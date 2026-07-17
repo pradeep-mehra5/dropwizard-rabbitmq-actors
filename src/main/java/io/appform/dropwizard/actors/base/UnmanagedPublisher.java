@@ -7,12 +7,17 @@ import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.MessageProperties;
 import io.appform.dropwizard.actors.actor.ActorConfig;
 import io.appform.dropwizard.actors.actor.DelayType;
+import io.appform.dropwizard.actors.actor.ExchangeType;
+import io.appform.dropwizard.actors.actor.ExchangeTypeBindingKeysVisitor;
+import io.appform.dropwizard.actors.actor.ExchangeTypeVisitor;
 import io.appform.dropwizard.actors.base.utils.NamingUtils;
 import io.appform.dropwizard.actors.common.Constants;
 import io.appform.dropwizard.actors.common.RabbitmqActorException;
 import io.appform.dropwizard.actors.connectivity.RMQConnection;
 import io.appform.dropwizard.actors.observers.PublishObserverContext;
 import io.appform.dropwizard.actors.observers.RMQObserver;
+import java.util.List;
+import java.util.Map;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
@@ -31,6 +36,7 @@ public class UnmanagedPublisher<Message> {
     private final RMQConnection connection;
     private final ObjectMapper mapper;
     private final ShardIdCalculator<Message> shardIdCalculator;
+    private final RoutingKeyResolver<Message> routingKeyResolver;
     private final RMQObserver observer;
     private Channel publishChannel;
 
@@ -51,9 +57,19 @@ public class UnmanagedPublisher<Message> {
                               final ShardIdCalculator<Message> shardIdCalculator,
                               final RMQConnection connection,
                               final ObjectMapper mapper) {
+        this(queueName, config, shardIdCalculator, null, connection, mapper);
+    }
+
+    public UnmanagedPublisher(final String queueName,
+                              final ActorConfig config,
+                              final ShardIdCalculator<Message> shardIdCalculator,
+                              final RoutingKeyResolver<Message> routingKeyResolver,
+                              final RMQConnection connection,
+                              final ObjectMapper mapper) {
         this.queueName = queueName;
         this.config = config;
         this.shardIdCalculator = shardIdCalculator;
+        this.routingKeyResolver = routingKeyResolver;
         this.connection = connection;
         this.mapper = mapper;
         this.observer = connection.getRootObserver();
@@ -81,7 +97,7 @@ public class UnmanagedPublisher<Message> {
                             routingKey, messageDetails.getMessageProperties(),
                             mapper().writeValueAsBytes(message));
                 } catch (IOException e) {
-                    log.error("Error while publishing: {}", e);
+                    log.error("Error while publishing", e);
                     throw RabbitmqActorException.propagate(e);
                 }
                 return null;
@@ -96,15 +112,6 @@ public class UnmanagedPublisher<Message> {
                 .build();
         val finalProperties = getPropertiesWithExpiry(properties, expiryInMs);
         publish(message, finalProperties);
-    }
-
-    public final void publishWithDelayAndExpiry(final Message message,
-                                                final long expiryInMs,
-                                                final long delayMilliseconds) throws Exception {
-        AMQP.BasicProperties properties = getPropertiesWithDelay(delayMilliseconds);
-        val finalProperties = getPropertiesWithExpiry(properties, expiryInMs);
-        publishWithDelay(message, finalProperties);
-
     }
 
     public final void publish(final Message message) throws Exception {
@@ -122,7 +129,7 @@ public class UnmanagedPublisher<Message> {
             try {
                 publishChannel.basicPublish(config.getExchange(), routingKey, enrichedProperties, mapper().writeValueAsBytes(message));
             } catch (IOException e) {
-                log.error("Error while publishing: {}", e);
+                log.error("Error while publishing", e);
                 throw RabbitmqActorException.propagate(e);
             }
             return null;
@@ -204,12 +211,15 @@ public class UnmanagedPublisher<Message> {
     public void start() throws Exception {
         final String exchange = config.getExchange();
         final String dlx = NamingUtils.getSideline(config.getExchange());
+        final ExchangeType exchangeType = getExchangeType();
         if (config.isDelayed()) {
             ensureDelayedExchange(exchange);
         } else {
-            ensureExchange(exchange);
+            ensureExchange(exchange, exchangeType);
         }
-        ensureExchange(dlx);
+        // Sideline/DLX is always DIRECT: dead-lettered messages route by exact routing key = queue name.
+        // FANOUT would broadcast to all sideline queues; TOPIC's patterns wouldn't match the queue name.
+        ensureExchange(dlx, ExchangeType.DIRECT);
 
         this.publishChannel = connection.newChannel();
         String sidelineQueueName = NamingUtils.getSideline(queueName);
@@ -218,11 +228,15 @@ public class UnmanagedPublisher<Message> {
             int bound = config.getShardCount();
             for (int shardId = 0; shardId < bound; shardId++) {
                 String shardedQueueName = NamingUtils.getShardedQueueName(queueName, shardId);
-                connection.ensure(shardedQueueName, config.getExchange(), connection.rmqOpts(dlx, config));
+                connection.ensureWithBindingKeys(shardedQueueName, config.getExchange(),
+                        mainExchangeBindingKeys(shardedQueueName),
+                        dlqOpts(dlx, shardedQueueName));
                 connection.addBinding(sidelineQueueName, dlx, shardedQueueName);
             }
         } else {
-            connection.ensure(queueName, config.getExchange(), connection.rmqOpts(dlx, config));
+            connection.ensureWithBindingKeys(queueName, config.getExchange(),
+                    mainExchangeBindingKeys(queueName),
+                    dlqOpts(dlx, queueName));
         }
 
         if (config.getDelayType() == DelayType.TTL) {
@@ -234,7 +248,7 @@ public class UnmanagedPublisher<Message> {
 
         if (config.isSidelineProcessorEnabled()) {
             final var sidelineProcessorExchange = NamingUtils.getSidelineProcessor(config.getExchange());
-            ensureExchange(sidelineProcessorExchange);
+            ensureExchange(sidelineProcessorExchange, ExchangeType.DIRECT);
 
             final var sidelineProcessorQueue = NamingUtils.getSidelineProcessor(queueName);
 
@@ -245,29 +259,73 @@ public class UnmanagedPublisher<Message> {
                 for (int shardId = 0; shardId < bound ; shardId++)
                 {
                     String shardedQueueName = NamingUtils.getShardedQueueName(sidelineProcessorQueue, shardId);
-                    connection.ensure(shardedQueueName, sidelineProcessorExchange, connection.rmqOpts(dlx, config));
+                    connection.ensure(shardedQueueName, sidelineProcessorExchange,
+                            dlqOpts(dlx, shardedQueueName));
                     connection.addBinding(sidelineQueueName, dlx, shardedQueueName);
                 }
             }
             else
             {
-                connection.ensure(sidelineProcessorQueue, sidelineProcessorExchange, connection.rmqOpts(dlx, config));
+                connection.ensure(sidelineProcessorQueue, sidelineProcessorExchange,
+                        dlqOpts(dlx, sidelineProcessorQueue));
                 connection.addBinding(sidelineQueueName, dlx, sidelineProcessorQueue);
             }
         }
     }
 
-    private void ensureExchange(String exchange) throws IOException {
+    private ExchangeType getExchangeType() {
+        final ExchangeType exchangeType = config.getExchangeType();
+        // TOPIC routes on a message-derived key, so a resolver is mandatory.
+        if (exchangeType == ExchangeType.TOPIC && routingKeyResolver == null) {
+            throw new IllegalStateException(String.format(
+                    "A RoutingKeyResolver must be supplied for TOPIC exchange. queue: %s", queueName));
+        }
+        // TTL delay re-routes via the queue name, which only works on a DIRECT exchange (see ensureDelayedExchange).
+        if (config.isDelayed() && config.getDelayType() == DelayType.TTL
+                && exchangeType != ExchangeType.DIRECT) {
+            throw new IllegalStateException(String.format(
+                    "TTL based delay is only supported for a DIRECT exchange. queue: %s", queueName));
+        }
+        return exchangeType;
+    }
+
+    private List<String> mainExchangeBindingKeys(final String queue) {
+        return config.getExchangeType()
+                .handleConfig(new ExchangeTypeBindingKeysVisitor(config, queue));
+    }
+
+    /**
+     * Builds the queue arguments for a dead-lettered queue.
+     *
+     * <p>For a DIRECT exchange we deliberately do NOT set {@code x-dead-letter-routing-key}, preserving the
+     * historical behaviour (RabbitMQ reuses the original routing key, which equals the queue name). This keeps
+     * queue arguments byte-identical to previous versions and avoids PRECONDITION_FAILED errors when redeclaring
+     * pre-existing queues on upgrade.
+     *
+     * <p>For TOPIC/FANOUT exchanges the original routing key would not match the direct {@code _SIDELINE} binding,
+     * so we pin {@code x-dead-letter-routing-key} to the queue name to ensure dead-lettered messages reach the
+     * correct sideline queue. These are new queues, so there is no existing-arg conflict.
+     */
+    private Map<String, Object> dlqOpts(final String deadLetterExchange,
+                                        final String deadLetterRoutingKey) {
+        if (config.getExchangeType() == ExchangeType.DIRECT) {
+            return connection.rmqOpts(deadLetterExchange, config);
+        }
+        return connection.rmqOpts(deadLetterExchange, deadLetterRoutingKey, config);
+    }
+
+    private void ensureExchange(String exchange, ExchangeType exchangeType) throws IOException {
         connection.channel().exchangeDeclare(
                 exchange,
-                "direct", true);
-        log.info("Created exchange: {}", exchange);
+                exchangeType.amqpType(), true);
+        log.info("Created exchange: {} of type: {}", exchange, exchangeType.amqpType());
     }
 
     private void ensureDelayedExchange(String exchange) throws IOException {
         if (config.getDelayType() == DelayType.TTL) {
-            ensureExchange(ttlExchange(config));
-            ensureExchange(exchange);
+            // TTL delay is guarded to DIRECT only (see getExchangeType), so both exchanges are DIRECT.
+            ensureExchange(ttlExchange(config), ExchangeType.DIRECT);
+            ensureExchange(exchange, ExchangeType.DIRECT);
         } else {
             // https://blog.rabbitmq.com/posts/2015/04/scheduling-messages-with-rabbitmq/
             connection.channel().exchangeDeclare(
@@ -276,7 +334,8 @@ public class UnmanagedPublisher<Message> {
                     true,
                     false,
                     ImmutableMap.<String, Object>builder()
-                            .put("x-delayed-type", "direct")
+                            // Delayed exchange forwards using the configured type once the delay elapses.
+                            .put("x-delayed-type", config.getExchangeType().amqpType())
                             .build());
             log.info("Created delayed exchange: {}", exchange);
         }
@@ -299,7 +358,7 @@ public class UnmanagedPublisher<Message> {
                 log.warn("Publisher channel already closed for queue [{}]", queueName);
             }
         } catch (Exception e) {
-            log.error(String.format("Error closing publisher channel for queue [%s]", queueName), e);
+            log.error("Error closing publisher channel for queue [{}]", queueName, e);
             throw e;
         }
     }
@@ -313,7 +372,25 @@ public class UnmanagedPublisher<Message> {
     }
 
     private String getRoutingKey(Message message) {
-        return config.isSharded() ? NamingUtils.getShardedQueueName(queueName, shardIdCalculator.calculateShardId(message)) : queueName;
+        // Routing key depends on exchange type: DIRECT -> queue/shard name, TOPIC -> resolver, FANOUT -> ignored.
+        return config.getExchangeType().handleConfig(new ExchangeTypeVisitor<String>() {
+            @Override
+            public String visitDirect() {
+                return config.isSharded()
+                       ? NamingUtils.getShardedQueueName(queueName, shardIdCalculator.calculateShardId(message))
+                       : queueName;
+            }
+
+            @Override
+            public String visitTopic() {
+                return routingKeyResolver.resolve(message);
+            }
+
+            @Override
+            public String visitFanout() {
+                return "";
+            }
+        });
     }
 
 }
