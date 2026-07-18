@@ -334,8 +334,8 @@ public class UnmanagedPublisher<Message> {
     private void ensureExchange(String exchange, ExchangeType exchangeType) throws IOException {
         connection.channel().exchangeDeclare(
                 exchange,
-                exchangeType.amqpType(), true);
-        log.info("Created exchange: {} of type: {}", exchange, exchangeType.amqpType());
+                exchangeType.getAmqpType(), true);
+        log.info("Created exchange: {} of type: {}", exchange, exchangeType.getAmqpType());
     }
 
     private void ensureDelayedExchange(String exchange) throws IOException {
@@ -352,7 +352,7 @@ public class UnmanagedPublisher<Message> {
                     false,
                     ImmutableMap.<String, Object>builder()
                             // Delayed exchange forwards using the configured type once the delay elapses.
-                            .put("x-delayed-type", config.getExchangeType().amqpType())
+                            .put("x-delayed-type", config.getExchangeType().getAmqpType())
                             .build());
             log.info("Created delayed exchange: {}", exchange);
         }

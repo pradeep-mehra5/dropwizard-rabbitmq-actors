@@ -1,41 +1,31 @@
 package io.appform.dropwizard.actors.actor;
 
-public enum ExchangeType {
-    DIRECT {
-        @Override
-        public String amqpType() {
-            return "direct";
-        }
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
 
+@Getter
+@RequiredArgsConstructor
+public enum ExchangeType {
+    DIRECT("direct") {
         @Override
         public <T> T handleConfig(ExchangeTypeVisitor<T> visitor) {
             return visitor.visitDirect();
         }
     },
-    TOPIC {
-        @Override
-        public String amqpType() {
-            return "topic";
-        }
-
+    TOPIC("topic") {
         @Override
         public <T> T handleConfig(ExchangeTypeVisitor<T> visitor) {
             return visitor.visitTopic();
         }
     },
-    FANOUT {
-        @Override
-        public String amqpType() {
-            return "fanout";
-        }
-
+    FANOUT("fanout") {
         @Override
         public <T> T handleConfig(ExchangeTypeVisitor<T> visitor) {
             return visitor.visitFanout();
         }
     };
 
-    public abstract String amqpType();
+    private final String amqpType;
 
     public abstract <T> T handleConfig(ExchangeTypeVisitor<T> visitor);
 }
