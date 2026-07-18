@@ -114,6 +114,15 @@ public class UnmanagedPublisher<Message> {
         publish(message, finalProperties);
     }
 
+    public final void publishWithDelayAndExpiry(final Message message,
+                                                final long expiryInMs,
+                                                final long delayMilliseconds) throws Exception {
+        AMQP.BasicProperties properties = getPropertiesWithDelay(delayMilliseconds);
+        val finalProperties = getPropertiesWithExpiry(properties, expiryInMs);
+        publishWithDelay(message, finalProperties);
+
+    }
+
     public final void publish(final Message message) throws Exception {
         publish(message, MessageProperties.MINIMAL_PERSISTENT_BASIC);
     }

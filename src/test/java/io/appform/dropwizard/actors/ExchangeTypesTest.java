@@ -315,6 +315,15 @@ class ExchangeTypesTest {
     }
 
     @Test
+    void testValidationRejectsTopicWithSharding() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("topic-exchange");
+        actorConfig.setExchangeType(ExchangeType.TOPIC);
+        actorConfig.setShardCount(2);
+        Assertions.assertFalse(actorConfig.isValidTopicSharding());
+    }
+
+    @Test
     void testValidationRejectsTtlDelayOnNonDirect() {
         val actorConfig = new ActorConfig();
         actorConfig.setExchange("topic-exchange");
@@ -340,6 +349,7 @@ class ExchangeTypesTest {
         actorConfig.setExchange("direct-exchange");
         Assertions.assertTrue(actorConfig.isValidBindingKeys());
         Assertions.assertTrue(actorConfig.isValidFanoutSharding());
+        Assertions.assertTrue(actorConfig.isValidTopicSharding());
         Assertions.assertTrue(actorConfig.isValidTtlDelayExchangeType());
     }
 

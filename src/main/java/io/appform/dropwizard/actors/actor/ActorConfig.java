@@ -169,9 +169,20 @@ public class ActorConfig {
      * exchange delivers it to exactly one shard queue. FANOUT cannot honour that per-shard routing (it would copy
      * every message to all shard queues), so the combination is invalid.
      */
-    @ValidationMethod(message = "FANOUT exchange cannot be used with sharding.")
+    @ValidationMethod(message = "FANOUT exchange cannot be used with sharding. Sharding is only supported with DIRECT.")
     public boolean isValidFanoutSharding() {
         return exchangeType != ExchangeType.FANOUT || !isSharded();
+    }
+
+    /**
+     * TOPIC exchanges route by the message-derived key, but the publisher does not incorporate the shard id into
+     * that key, nor are per-shard binding keys generated. So a sharded TOPIC actor would either broadcast every
+     * message to all shard queues (when the bindingKeys match) or drop them all (when they don't) - never the
+     * "one message -> one shard" semantics sharding promises. Reject the combination.
+     */
+    @ValidationMethod(message = "TOPIC exchange cannot be used with sharding. Sharding is only supported with DIRECT.")
+    public boolean isValidTopicSharding() {
+        return exchangeType != ExchangeType.TOPIC || !isSharded();
     }
 
     /**

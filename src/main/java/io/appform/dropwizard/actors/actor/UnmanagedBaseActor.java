@@ -242,6 +242,10 @@ public class UnmanagedBaseActor<Message> {
         return publishActor().pendingSidelineMessagesCount();
     }
 
+    public final long pendingSidelineProcessorMessagesCount() {
+        return publishActor().pendingSidelineProcessorMessagesCount();
+    }
+
     private UnmanagedPublisher<Message> publishActor() {
         if (Objects.isNull(publishActor)) {
             throw new NotImplementedException("PublishActor is not initialized");
