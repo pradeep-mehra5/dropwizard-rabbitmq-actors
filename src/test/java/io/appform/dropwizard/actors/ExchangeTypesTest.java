@@ -9,6 +9,7 @@ import io.appform.dropwizard.actors.actor.DelayType;
 import io.appform.dropwizard.actors.actor.ExchangeType;
 import io.appform.dropwizard.actors.base.RandomShardIdCalculator;
 import io.appform.dropwizard.actors.base.RoutingKeyResolver;
+import io.appform.dropwizard.actors.base.ShardIdCalculator;
 import io.appform.dropwizard.actors.base.UnmanagedPublisher;
 import io.appform.dropwizard.actors.base.utils.NamingUtils;
 import io.appform.dropwizard.actors.config.MetricConfig;
@@ -18,6 +19,8 @@ import io.appform.dropwizard.actors.connectivity.actor.RabbitMQBundleTestAppConf
 import io.appform.dropwizard.actors.observers.ThreadLocalObserver;
 import io.dropwizard.lifecycle.setup.LifecycleEnvironment;
 import io.dropwizard.setup.Environment;
+import java.util.ArrayList;
+import java.util.Collections;
 import lombok.val;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +30,8 @@ import org.mockito.Mockito;
 
 import java.util.List;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -39,7 +44,7 @@ class ExchangeTypesTest {
     @BeforeEach
     public void setup() throws Exception {
         val config = RMQConfig.builder()
-                .brokers(new java.util.ArrayList<>())
+                .brokers(new ArrayList<>())
                 .userName("")
                 .threadPoolSize(1)
                 .password("")
@@ -194,6 +199,148 @@ class ExchangeTypesTest {
 
         verify(channel, times(1))
                 .exchangeDeclare(NamingUtils.getSideline("topic-exchange"), "direct", true);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Publish-time routing key resolution: this is what actually decides which queue(s) a message
+    // reaches at runtime, and differs per exchange type.
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    void testDirectPublishUsesQueueNameAsRoutingKey() throws Exception {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("direct-exchange");
+        val queueName = NamingUtils.queueName(actorConfig.getPrefix(), "direct-queue");
+        val publisher = newPublisher("direct-queue", actorConfig, null);
+        publisher.start();
+
+        publisher.publish(Collections.singletonMap("k", "v"));
+
+        // DIRECT: routing key == queue name so the direct exchange routes to exactly that queue.
+        verify(channel, times(1)).basicPublish(
+                eq("direct-exchange"), eq(queueName), any(), any(byte[].class));
+    }
+
+    @Test
+    void testDirectShardedPublishUsesShardedQueueNameAsRoutingKey() throws Exception {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("direct-exchange");
+        actorConfig.setShardCount(4);
+        actorConfig.setConcurrency(4);
+        val queueName = NamingUtils.queueName(actorConfig.getPrefix(), "sharded-queue");
+        // Deterministic shard so we can assert the exact routing key.
+        final ShardIdCalculator<Object> fixedShard = message -> 2;
+        val publisher = new UnmanagedPublisher<>(queueName, actorConfig, fixedShard, null, connection, objectMapper);
+        publisher.start();
+
+        publisher.publish(Collections.singletonMap("k", "v"));
+
+        // DIRECT + sharded: routing key == <queue>_<shardId> so it lands on the chosen shard queue.
+        verify(channel, times(1)).basicPublish(
+                eq("direct-exchange"),
+                eq(NamingUtils.getShardedQueueName(queueName, 2)),
+                any(),
+                any(byte[].class));
+    }
+
+    @Test
+    void testTopicPublishUsesResolvedRoutingKey() throws Exception {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("topic-exchange");
+        actorConfig.setExchangeType(ExchangeType.TOPIC);
+        val publisher = newPublisher("topic-queue", actorConfig, message -> "orders.created.v2");
+        publisher.start();
+
+        publisher.publish(Collections.singletonMap("k", "v"));
+
+        // TOPIC: routing key comes from the RoutingKeyResolver so the broker can pattern-match bindings.
+        verify(channel, times(1)).basicPublish(
+                eq("topic-exchange"), eq("orders.created.v2"), any(), any(byte[].class));
+    }
+
+    @Test
+    void testFanoutPublishUsesEmptyRoutingKey() throws Exception {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("fanout-exchange");
+        actorConfig.setExchangeType(ExchangeType.FANOUT);
+        val publisher = newPublisher("fanout-queue", actorConfig, null);
+        publisher.start();
+
+        publisher.publish(Collections.singletonMap("k", "v"));
+
+        // FANOUT: routing key is ignored by the broker; publisher sends empty string.
+        verify(channel, times(1)).basicPublish(
+                eq("fanout-exchange"), eq(""), any(), any(byte[].class));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Config validation (@ValidationMethod). These guardrails are enforced at config-load time and
+    // document the constraints listed as limitations.
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    void testValidationRejectsBindingKeysOnDirect() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("direct-exchange");
+        actorConfig.setExchangeType(ExchangeType.DIRECT);
+        actorConfig.setBindingKeys(List.of("orders.*"));
+        Assertions.assertFalse(actorConfig.isValidBindingKeys());
+    }
+
+    @Test
+    void testValidationRejectsBindingKeysOnFanout() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("fanout-exchange");
+        actorConfig.setExchangeType(ExchangeType.FANOUT);
+        actorConfig.setBindingKeys(List.of("orders.*"));
+        Assertions.assertFalse(actorConfig.isValidBindingKeys());
+    }
+
+    @Test
+    void testValidationAllowsBindingKeysOnTopic() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("topic-exchange");
+        actorConfig.setExchangeType(ExchangeType.TOPIC);
+        actorConfig.setBindingKeys(List.of("orders.*"));
+        Assertions.assertTrue(actorConfig.isValidBindingKeys());
+    }
+
+    @Test
+    void testValidationRejectsFanoutWithSharding() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("fanout-exchange");
+        actorConfig.setExchangeType(ExchangeType.FANOUT);
+        actorConfig.setShardCount(2);
+        Assertions.assertFalse(actorConfig.isValidFanoutSharding());
+    }
+
+    @Test
+    void testValidationRejectsTtlDelayOnNonDirect() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("topic-exchange");
+        actorConfig.setExchangeType(ExchangeType.TOPIC);
+        actorConfig.setDelayed(true);
+        actorConfig.setDelayType(DelayType.TTL);
+        Assertions.assertFalse(actorConfig.isValidTtlDelayExchangeType());
+    }
+
+    @Test
+    void testValidationAllowsTtlDelayOnDirect() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("direct-exchange");
+        actorConfig.setExchangeType(ExchangeType.DIRECT);
+        actorConfig.setDelayed(true);
+        actorConfig.setDelayType(DelayType.TTL);
+        Assertions.assertTrue(actorConfig.isValidTtlDelayExchangeType());
+    }
+
+    @Test
+    void testValidationDefaultsAreValid() {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("direct-exchange");
+        Assertions.assertTrue(actorConfig.isValidBindingKeys());
+        Assertions.assertTrue(actorConfig.isValidFanoutSharding());
+        Assertions.assertTrue(actorConfig.isValidTtlDelayExchangeType());
     }
 
     private UnmanagedPublisher<Object> newPublisher(final String name,
