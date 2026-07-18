@@ -260,6 +260,10 @@ public abstract class BaseActor<Message> implements IBaseActor<Message> {
         return actorImpl.pendingSidelineMessagesCount();
     }
 
+    public final long pendingSidelineProcessorMessagesCount() {
+        return actorImpl.pendingSidelineProcessorMessagesCount();
+    }
+
     @Override
     public void start() throws Exception {
         actorImpl.start();

@@ -234,6 +234,11 @@ public class UnmanagedPublisher<Message> {
         String sidelineQueueName = NamingUtils.getSideline(queueName);
         connection.ensure(sidelineQueueName, queueName, dlx, connection.rmqOpts(config));
         if (config.isSharded()) {
+            // Sharding is only valid with a DIRECT exchange (TOPIC/FANOUT + sharding are rejected by
+            // ActorConfig validation). So here mainExchangeBindingKeys(shardedQueueName) resolves via the
+            // DIRECT visitor to a single binding key equal to the shard queue name - i.e. each shard queue
+            // is bound point-to-point by its own name. The ensureWithBindingKeys call is shared with the
+            // TOPIC/FANOUT path only for uniformity; it carries no pattern/broadcast semantics here.
             int bound = config.getShardCount();
             for (int shardId = 0; shardId < bound; shardId++) {
                 String shardedQueueName = NamingUtils.getShardedQueueName(queueName, shardId);
@@ -257,6 +262,9 @@ public class UnmanagedPublisher<Message> {
 
         if (config.isSidelineProcessorEnabled()) {
             final var sidelineProcessorExchange = NamingUtils.getSidelineProcessor(config.getExchange());
+            // Always DIRECT: the sideline-processor queue is bound by its exact queue name, so we need
+            // point-to-point routing regardless of the main exchange type (TOPIC patterns wouldn't match
+            // the queue name and FANOUT would broadcast to every sideline-processor queue).
             ensureExchange(sidelineProcessorExchange, ExchangeType.DIRECT);
 
             final var sidelineProcessorQueue = NamingUtils.getSidelineProcessor(queueName);
