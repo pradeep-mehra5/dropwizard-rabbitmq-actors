@@ -171,6 +171,17 @@ public class RMQConnection implements Managed {
         }
     }
 
+    /**
+     * Declares a queue (idempotent) without creating or modifying any bindings. Used when the immutable
+     * bindingKeys check has confirmed the existing bindings already match the desired set, so we must not
+     * add or remove bindings.
+     */
+    public void ensureQueueOnly(final String queueName,
+                                final Map<String, Object> rmqOpts) throws Exception {
+        channel.queueDeclare(queueName, true, false, false, rmqOpts);
+        log.info("Ensured queue (no binding changes): {}", queueName);
+    }
+
     public void addBinding(String queueName, String exchange, String routingKey) throws Exception {
         channel.queueBind(queueName, exchange, routingKey);
         log.info("Created binding for queue : {} bound to {} routing Key {}", queueName, exchange, routingKey);
