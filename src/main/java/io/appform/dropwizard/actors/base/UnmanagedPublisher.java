@@ -242,16 +242,11 @@ public class UnmanagedPublisher<Message> {
         connection.ensure(sidelineQueueName, queueName, dlx, connection.rmqOpts(config));
         if (config.isSharded()) {
             // Sharding is only valid with a DIRECT exchange (TOPIC/FANOUT + sharding are rejected by
-            // ActorConfig validation). So here mainExchangeBindingKeys(shardedQueueName) resolves via the
-            // DIRECT visitor to a single binding key equal to the shard queue name - i.e. each shard queue
-            // is bound point-to-point by its own name. The ensureWithBindingKeys call is shared with the
-            // TOPIC/FANOUT path only for uniformity; it carries no pattern/broadcast semantics here.
+            // ActorConfig validation), so each shard queue is bound by its own name - unchanged historical path.
             int bound = config.getShardCount();
             for (int shardId = 0; shardId < bound; shardId++) {
                 String shardedQueueName = NamingUtils.getShardedQueueName(queueName, shardId);
-                connection.ensureWithBindingKeys(shardedQueueName, config.getExchange(),
-                        mainExchangeBindingKeys(shardedQueueName),
-                        dlqOpts(dlx, shardedQueueName));
+                connection.ensure(shardedQueueName, config.getExchange(), connection.rmqOpts(dlx, config));
                 connection.addBinding(sidelineQueueName, dlx, shardedQueueName);
             }
         } else if (getExchangeType() == ExchangeType.TOPIC) {
@@ -266,13 +261,12 @@ public class UnmanagedPublisher<Message> {
             // exchange. ensureFanoutQueue detects that stale-exchange binding when the Management API is enabled.
             ensureFanoutQueue(queueName, dlx);
         } else {
-            // DIRECT: the binding key is the queue name (a fixed value derived from the queue), not
-            // user-configurable, so there is no bindingKey drift to guard against here. Exchange-level drift
-            // still applies though: verify BEFORE binding so a changed exchange fails without first creating
-            // the new binding.
-            verifyNoStaleExchangeBindings(queueName);
-            connection.ensureWithBindingKeys(queueName, config.getExchange(),
-                    mainExchangeBindingKeys(queueName), dlqOpts(dlx, queueName));
+            // DIRECT: unchanged from the historical behaviour - no Management-API checks. The binding key is the
+            // queue name (not user-configurable), so there is no bindingKey drift. Exchange-level drift (a stale
+            // binding left by changing the actor's exchange) is a pre-existing DIRECT behaviour and is
+            // intentionally NOT checked here: long-lived DIRECT queues may legitimately carry legacy/manual
+            // bindings, and failing their startup when the check is enabled would break existing deployments.
+            connection.ensure(queueName, config.getExchange(), connection.rmqOpts(dlx, config));
         }
 
         if (config.getDelayType() == DelayType.TTL) {
@@ -453,8 +447,9 @@ public class UnmanagedPublisher<Message> {
      *
      * <p>Called <b>before</b> binding the queue to its configured exchange, so a changed exchange fails fast
      * without first creating the new binding. On first creation the queue does not exist yet, so the read
-     * returns no bindings and the check passes. Applies to every exchange type (DIRECT/TOPIC/FANOUT), since
-     * changing the exchange is drift regardless of type. No-op when the Management API is disabled.
+     * returns no bindings and the check passes. Applied to TOPIC and FANOUT queues only; DIRECT is deliberately
+     * excluded to keep its historical behaviour (legacy DIRECT queues may carry old/manual bindings). No-op
+     * when the Management API is disabled.
      */
     private void verifyNoStaleExchangeBindings(final String queue) {
         final RmqManagementConfig mgmt = managementConfig();
@@ -486,8 +481,8 @@ public class UnmanagedPublisher<Message> {
         if (!staleExchanges.isEmpty()) {
             throw new IllegalStateException(String.format(
                     "Queue '%s' is bound to unexpected exchange(s) %s besides its configured exchange '%s'. "
-                            + "This is a stale binding left by changing the actor's exchange (binds are additive; "
-                            + "the framework never unbinds). To change the exchange, use a new/versioned queue.",
+                            + "This is a stale binding left by changing the actor's exchange."
+                            + "To change the exchange, use a new/versioned queue.",
                     queue, staleExchanges, config.getExchange()));
         }
     }

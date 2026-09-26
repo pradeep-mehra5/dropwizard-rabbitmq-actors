@@ -13,7 +13,9 @@ import io.appform.dropwizard.actors.base.ShardIdCalculator;
 import io.appform.dropwizard.actors.base.UnmanagedPublisher;
 import io.appform.dropwizard.actors.base.utils.NamingUtils;
 import io.appform.dropwizard.actors.config.MetricConfig;
+import io.appform.dropwizard.actors.config.Broker;
 import io.appform.dropwizard.actors.config.RMQConfig;
+import io.appform.dropwizard.actors.config.RmqManagementConfig;
 import io.appform.dropwizard.actors.connectivity.RMQConnection;
 import io.appform.dropwizard.actors.connectivity.actor.RabbitMQBundleTestAppConfiguration;
 import io.appform.dropwizard.actors.observers.ThreadLocalObserver;
@@ -22,6 +24,8 @@ import io.dropwizard.setup.Environment;
 import java.util.ArrayList;
 import java.util.Collections;
 import lombok.val;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -351,6 +355,161 @@ class ExchangeTypesTest {
         Assertions.assertTrue(actorConfig.isValidFanoutSharding());
         Assertions.assertTrue(actorConfig.isValidTopicSharding());
         Assertions.assertTrue(actorConfig.isValidTtlDelayExchangeType());
+    }
+
+    @Test
+    void testDirectSkipsManagementApiChecksEvenWhenEnabled() throws Exception {
+        // Management API enabled in strict mode but pointing at an unreachable port: any Management-API call
+        // would throw. DIRECT must keep its historical behaviour and never call it, so start() succeeds.
+        final RMQConfig rmqConfig = new RMQConfig();
+        rmqConfig.setBrokers(new ArrayList<>(List.of(new Broker("localhost", 5672))));
+        rmqConfig.setUserName("guest");
+        rmqConfig.setPassword("guest");
+        rmqConfig.setManagementConfig(RmqManagementConfig.builder()
+                .enabled(true)
+                .port(1)
+                .failOnManagementUnavailable(true)
+                .build());
+        Mockito.doReturn(rmqConfig).when(connection).getConfig();
+
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("direct-exchange");
+        val publisher = newPublisher("direct-queue", actorConfig, null);
+
+        Assertions.assertDoesNotThrow(publisher::start);
+        // DIRECT uses the original (pre-exchange-types) ensure(queue, exchange, opts) call, i.e. a single
+        // binding keyed by the queue name - never the binding-keys path.
+        verify(connection, times(1)).ensure(
+                eq(NamingUtils.queueName(actorConfig.getPrefix(), "direct-queue")), eq("direct-exchange"), any());
+        verify(connection, Mockito.never()).ensureWithBindingKeys(any(), any(), any(), any());
+    }
+
+    @Test
+    void testShardedDirectUsesOriginalEnsurePerShard() throws Exception {
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("direct-exchange");
+        actorConfig.setShardCount(3);
+        actorConfig.setConcurrency(3);
+        val queueName = NamingUtils.queueName(actorConfig.getPrefix(), "sharded-queue");
+        val publisher = newPublisher("sharded-queue", actorConfig, null);
+        publisher.start();
+
+        for (int shardId = 0; shardId < 3; shardId++) {
+            verify(connection, times(1)).ensure(
+                    eq(NamingUtils.getShardedQueueName(queueName, shardId)), eq("direct-exchange"), any());
+        }
+        verify(connection, Mockito.never()).ensureWithBindingKeys(any(), any(), any(), any());
+    }
+
+    @Test
+    void testFanoutRunsManagementApiCheckWhenEnabled() {
+        // Same unreachable, strict Management API: FANOUT does run the stale-exchange check, so start() fails.
+        final RMQConfig rmqConfig = new RMQConfig();
+        rmqConfig.setBrokers(new ArrayList<>(List.of(new Broker("localhost", 5672))));
+        rmqConfig.setUserName("guest");
+        rmqConfig.setPassword("guest");
+        rmqConfig.setManagementConfig(RmqManagementConfig.builder()
+                .enabled(true)
+                .port(1)
+                .failOnManagementUnavailable(true)
+                .build());
+        Mockito.doReturn(rmqConfig).when(connection).getConfig();
+
+        val actorConfig = new ActorConfig();
+        actorConfig.setExchange("fanout-exchange");
+        actorConfig.setExchangeType(ExchangeType.FANOUT);
+        val publisher = newPublisher("fanout-queue", actorConfig, null);
+
+        Assertions.assertThrows(IllegalStateException.class, publisher::start);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // First-creation race (TOPIC, Management API strict). The queue looks new (no bindings), so we bind
+    // our configured keys and re-read. If a concurrent creator bound divergent keys in the meantime, the
+    // re-read is a superset of our configured keys and startup must fail. A MockWebServer stands in for the
+    // Management API: the publisher derives its base URL from the broker host + managementConfig.port, so we
+    // point both at the mock and serve the three reads (stale-exchange, first-creation, re-read) in FIFO order.
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    void testTopicFirstCreationRaceDivergentKeysFails() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            stubConnectionConfig(server);
+
+            // #1 stale-exchange read (verifyNoStaleExchangeBindings): no stale exchange bindings.
+            server.enqueue(jsonResponse("[]"));
+            // #2 first-creation read (fetchBindingKeys): queue has no bindings yet -> we believe we are first.
+            server.enqueue(jsonResponse("[]"));
+            // #3 re-read after our bind: a concurrent creator added a divergent key -> superset of ours.
+            server.enqueue(jsonResponse(bindings("topic-exchange", "order.*", "order.created")));
+
+            val actorConfig = new ActorConfig();
+            actorConfig.setExchange("topic-exchange");
+            actorConfig.setExchangeType(ExchangeType.TOPIC);
+            actorConfig.setBindingKeys(List.of("order.*"));
+            val publisher = newPublisher("topic-queue", actorConfig, message -> "order.created");
+
+            val ex = Assertions.assertThrows(IllegalStateException.class, publisher::start);
+            Assertions.assertTrue(ex.getMessage().contains("mismatch after first-creation bind"),
+                    "unexpected message: " + ex.getMessage());
+            Assertions.assertEquals(3, server.getRequestCount());
+        }
+    }
+
+    @Test
+    void testTopicFirstCreationRaceMatchingKeysSucceeds() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            stubConnectionConfig(server);
+
+            server.enqueue(jsonResponse("[]"));
+            server.enqueue(jsonResponse("[]"));
+            // Re-read agrees exactly with our configured keys -> no divergent creator -> start() succeeds.
+            server.enqueue(jsonResponse(bindings("topic-exchange", "order.*")));
+
+            val actorConfig = new ActorConfig();
+            actorConfig.setExchange("topic-exchange");
+            actorConfig.setExchangeType(ExchangeType.TOPIC);
+            actorConfig.setBindingKeys(List.of("order.*"));
+            val publisher = newPublisher("topic-queue", actorConfig, message -> "order.created");
+
+            Assertions.assertDoesNotThrow(publisher::start);
+            Assertions.assertEquals(3, server.getRequestCount());
+        }
+    }
+
+    private void stubConnectionConfig(final MockWebServer server) {
+        final RMQConfig rmqConfig = new RMQConfig();
+        rmqConfig.setBrokers(new ArrayList<>(List.of(new Broker(server.getHostName(), 5672))));
+        rmqConfig.setUserName("guest");
+        rmqConfig.setPassword("guest");
+        rmqConfig.setManagementConfig(RmqManagementConfig.builder()
+                .enabled(true)
+                .port(server.getPort())
+                .failOnManagementUnavailable(true)
+                .build());
+        Mockito.doReturn(rmqConfig).when(connection).getConfig();
+    }
+
+    private static MockResponse jsonResponse(final String body) {
+        return new MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody(body);
+    }
+
+    private static String bindings(final String source, final String... routingKeys) {
+        val sb = new StringBuilder("[");
+        for (int i = 0; i < routingKeys.length; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(String.format(
+                    "{\"source\":\"%s\",\"vhost\":\"/\",\"destination\":\"q\","
+                            + "\"destination_type\":\"queue\",\"routing_key\":\"%s\"}",
+                    source, routingKeys[i]));
+        }
+        return sb.append(']').toString();
     }
 
     private UnmanagedPublisher<Object> newPublisher(final String name,
