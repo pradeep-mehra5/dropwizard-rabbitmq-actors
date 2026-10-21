@@ -21,6 +21,8 @@ import com.google.common.base.Preconditions;
 import io.appform.dropwizard.actors.common.Constants;
 import io.appform.dropwizard.actors.config.RMQConfig;
 import io.appform.dropwizard.actors.connectivity.RMQConnection;
+import io.appform.dropwizard.actors.messaging.Messaging;
+import io.appform.dropwizard.actors.messaging.config.MessagingConfig;
 import io.appform.dropwizard.actors.metrics.RMQMetricObserver;
 import io.appform.dropwizard.actors.observers.RMQObserver;
 import io.appform.dropwizard.actors.observers.TerminalRMQObserver;
@@ -44,6 +46,7 @@ public abstract class RabbitmqActorBundle<T extends Configuration> implements Co
 
     @Getter
     private ConnectionRegistry connectionRegistry;
+    private Messaging messaging;
     private final List<RMQObserver> observers = new ArrayList<>();
     private RMQConfig rmqConfig;
 
@@ -62,6 +65,20 @@ public abstract class RabbitmqActorBundle<T extends Configuration> implements Co
         this.connectionRegistry = new ConnectionRegistry(environment, executorServiceProvider, rmqConfig,
                 ttlConfig == null ? TtlConfig.builder().build(): ttlConfig, rootObserver);
         environment.lifecycle().manage(connectionRegistry);
+        val messagingConfig = getMessagingConfig(t);
+        if (null != messagingConfig) {
+            this.messaging = new Messaging(messagingConfig, rmqConfig, connectionRegistry,
+                    environment.getObjectMapper());
+            // Managed after the connection registry, so it stops before connections are closed.
+            environment.lifecycle().manage(messaging);
+        }
+    }
+
+    /**
+     * Override to enable exchange-centric messaging ({@link Messaging}). Returns null (disabled) by default.
+     */
+    protected MessagingConfig getMessagingConfig(T t) {
+        return null;
     }
 
     protected abstract TtlConfig ttlConfig();
@@ -69,6 +86,18 @@ public abstract class RabbitmqActorBundle<T extends Configuration> implements Co
     @Override
     public void initialize(Bootstrap<?> bootstrap) {
 
+    }
+
+    /**
+     * Exchange-centric messaging.
+     *
+     * @throws IllegalStateException when messaging is not configured
+     */
+    public Messaging getMessaging() {
+        if (null == messaging) {
+            throw new IllegalStateException("Messaging is not configured; override getMessagingConfig");
+        }
+        return messaging;
     }
 
     public RMQConnection getDefaultProducerConnection() {
