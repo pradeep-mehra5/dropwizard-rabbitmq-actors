@@ -39,7 +39,7 @@ messaging:
   exchanges:
     order_events:
       type: TOPIC                      # DIRECT | TOPIC | FANOUT
-      delayed: false                   # x-delayed-message exchange, enables publishWithDelay (needs captureUnroutable)
+      delayed: false                   # x-delayed-message exchange, enables publishWithDelay (see the risk below)
       captureUnroutable: true          # unmatched events go to the <prefix>.<exchange>_UNROUTED queue
       publisherConfirms: true          # default; publish waits for the broker's confirm
       queues:
@@ -103,7 +103,6 @@ make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnk
     the same service is not supported;
   * a DIRECT/TOPIC queue has no binding keys, a FANOUT queue has binding keys, or a binding key is blank, has
     surrounding whitespace or (TOPIC) an empty word;
-  * a delayed exchange doesn't set `captureUnroutable`;
   * a queue name ends with `_SIDELINE`, `_RETRY` or `_UNROUTED`, or an exchange name ends with `_SIDELINE` or
     `_UNROUTED` (reserved for derived names);
   * a configured queue has no handler;
@@ -116,7 +115,9 @@ make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnk
     `publisherConfirms: false` for fire-and-forget throughput; unroutable events are then only logged.
   * A confirm timeout can leave the caller unsure whether the broker got the event, so retries can duplicate it.
     Consumers should be idempotent.
-  * The delayed-message plugin does not support `mandatory`, so delayed exchanges must use `captureUnroutable`.
+  * **Risk with delayed exchanges:** the delayed-message plugin does not support `mandatory`, so an event that no
+    binding matches is *not* detected, even with confirms, and is dropped silently. Set `captureUnroutable: true` on
+    delayed exchanges to keep such events.
   * A publisher whose channel gets closed (confirm timeout, broker error) reopens it on the next publish.
   * Routing keys are limited to 255 bytes.
 * **Retries stay local.** `retryLater` goes through a private per-queue delayed exchange (`<queue>_RETRY`), so a
@@ -124,14 +125,16 @@ make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnk
 * **Sideline.** Each queue dead-letters rejected events to its own `<queue>_SIDELINE` queue.
 * **Consumption** runs on the same consumer as actors: concurrency, prefetch, retry config, exception handling,
   expiry (`publishWithExpiry` / `handleExpired`) and metrics behave identically.
-* **Queue arguments** (queue type, HA, auto-delete `ttlConfig`) are built as for actors. `ttlConfig` deletes an unused
-  queue (`x-expires`); it is not a message TTL. Priority queues are not supported.
+* **Queue arguments** (queue type, lazy mode, quorum group size, auto-delete `ttlConfig`) are built as for actors.
+  `ttlConfig` deletes an unused queue (`x-expires`); it is not a message TTL. Priority queues are not supported.
+  `haMode`/`haParams` are not supported either: as queue arguments they don't enable mirroring. For replicated queues
+  use `queueType: QUORUM`, or a mirroring policy matching the messaging queue names.
 
 ### Changing topology
 * Adding queues or exchanges is always safe.
 * A queue's binding keys and exchange are fixed once it exists. With `managementConfig.enabled`, changing them
   fails startup; without it, old bindings silently remain. Use a new queue instead.
-* Queue arguments (queue type, priority, TTL, HA) and exchange settings (`type`, `delayed`, `captureUnroutable`)
+* Queue arguments (queue type, lazy mode, TTL) and exchange settings (`type`, `delayed`, `captureUnroutable`)
   can't be changed on an existing queue/exchange (the broker rejects the redeclare with `406 PRECONDITION_FAILED`).
 * Removing a queue from the config does not delete it on the broker; it stays bound and keeps collecting events.
   Delete or unbind it manually.

@@ -22,13 +22,21 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class ExchangeSpec {
 
+    /**
+     * How the exchange routes events to its queues: DIRECT (exact routing key), TOPIC (routing key pattern) or
+     * FANOUT (every queue). Can't be changed once the exchange exists.
+     */
     @NotNull
     private ExchangeType type;
 
     /**
      * Declare the exchange as an {@code x-delayed-message} exchange (rabbitmq_delayed_message_exchange plugin) so
-     * events can be published with a delay. The plugin does not support the {@code mandatory} flag, so a delayed
-     * exchange must also set {@link #captureUnroutable} to catch unroutable events.
+     * events can be published with a delay.
+     *
+     * <p><b>Risk:</b> the plugin does not support the {@code mandatory} flag, so the publisher can't detect an event
+     * that no binding matches, even with publisher confirms. Such an event is dropped silently unless
+     * {@link #captureUnroutable} is also set (whether the plugin honours the alternate exchange is yet to be
+     * verified).
      */
     @Builder.Default
     private boolean delayed = false;

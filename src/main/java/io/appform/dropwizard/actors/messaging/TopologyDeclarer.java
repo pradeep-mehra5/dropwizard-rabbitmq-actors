@@ -33,6 +33,8 @@ class TopologyDeclarer {
 
     static final String DELAYED_EXCHANGE_TYPE = "x-delayed-message";
     static final String DELAYED_TYPE_ARG = "x-delayed-type";
+    static final String HA_MODE_ARG = "ha-mode";
+    static final String HA_PARAMS_ARG = "ha-params";
 
     private final String prefix;
     private final BindingGuard bindingGuard;
@@ -82,7 +84,7 @@ class TopologyDeclarer {
                               final String queue,
                               final QueueSpec queueSpec) throws Exception {
         final String brokerQueue = MessagingNames.queue(prefix, queue);
-        final Map<String, Object> baseArgs = connection.rmqOpts(queueSpec.toQueueArgumentsConfig(names.broker()));
+        final Map<String, Object> baseArgs = queueArguments(connection, names, queueSpec);
 
         final String sidelineQueue = MessagingNames.sidelineQueue(brokerQueue);
         channel.queueDeclare(sidelineQueue, true, false, false, baseArgs);
@@ -109,6 +111,21 @@ class TopologyDeclarer {
             channel.queueBind(brokerQueue, retryExchange, brokerQueue);
             log.info("Declared retry exchange {} for queue {}", retryExchange, brokerQueue);
         }
+    }
+
+    /**
+     * Queue arguments built by the same code as for actors, minus {@code ha-mode}/{@code ha-params}: the actor builder
+     * always adds them for classic queues, but as queue arguments they don't enable mirroring (RabbitMQ mirrors classic
+     * queues only through policies), so messaging queues are declared without them.
+     */
+    private static Map<String, Object> queueArguments(final RMQConnection connection,
+                                                      final ExchangeNames names,
+                                                      final QueueSpec queueSpec) {
+        final Map<String, Object> args = new HashMap<>(
+                connection.rmqOpts(queueSpec.toQueueArgumentsConfig(names.broker())));
+        args.remove(HA_MODE_ARG);
+        args.remove(HA_PARAMS_ARG);
+        return args;
     }
 
     private void declareUnrouted(final Channel channel, final ExchangeNames names) throws IOException {

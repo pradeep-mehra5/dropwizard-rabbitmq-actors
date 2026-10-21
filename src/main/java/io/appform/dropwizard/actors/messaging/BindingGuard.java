@@ -115,7 +115,7 @@ class BindingGuard {
                                               final Set<String> otherAllowed,
                                               final List<Binding> bindings) {
         final Set<String> stale = bindings.stream()
-                .map(Binding::source)
+                .map(Binding::exchange)
                 .filter(source -> !source.equals(exchange) && !otherAllowed.contains(source))
                 .collect(Collectors.toSet());
         if (!stale.isEmpty()) {
@@ -128,7 +128,7 @@ class BindingGuard {
 
     private static List<String> keysFrom(final String exchange, final Optional<List<Binding>> bindings) {
         return bindings.orElse(List.of()).stream()
-                .filter(binding -> binding.source().equals(exchange))
+                .filter(binding -> binding.exchange().equals(exchange))
                 .map(Binding::routingKey)
                 .collect(Collectors.toList());
     }

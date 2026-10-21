@@ -34,8 +34,8 @@ import lombok.extern.slf4j.Slf4j;
  *       (unroutable) message fails the publish with {@link UnroutableMessageException};</li>
  *   <li>without confirms, returned messages are only logged (the publish has already returned).</li>
  * </ul>
- * The delayed-message plugin does not support {@code mandatory}, so delayed exchanges rely on
- * {@code captureUnroutable} (required by config validation).
+ * The delayed-message plugin does not support {@code mandatory}, so on a delayed exchange an unroutable event is
+ * not detected: it is dropped silently unless {@code captureUnroutable} is set.
  *
  * <p>Thread-safe: publishes are serialized on one channel. If the channel gets closed (e.g. a confirm timed out or the
  * broker rejected an operation), it is reopened on the next publish.

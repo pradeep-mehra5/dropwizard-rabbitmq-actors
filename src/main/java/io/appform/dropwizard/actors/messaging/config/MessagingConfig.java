@@ -42,12 +42,16 @@ public class MessagingConfig {
     @Builder.Default
     private String prefix = "rabbitmq.messaging";
 
+    /**
+     * Exchanges, keyed by the name your code uses, e.g. {@code messaging.publisher("order_events", ...)}.
+     *
+     * <p>The exchange created on RabbitMQ usually has the same name. Only when a namespace is set
+     * ({@code NAMESPACE_ENV_NAME} / {@code rmq.actors.namespace}, e.g. in feature environments) is it prefixed with
+     * it: {@code order_events} becomes {@code <namespace>.order_events} on the broker. Code always uses the name
+     * configured here.
+     */
     @NotNull
     @Valid
-    /**
-     * Exchanges keyed by logical name (used in code). The broker exchange name is the logical name prefixed with the
-     * namespace, if one is set.
-     */
     @Builder.Default
     private Map<String, ExchangeSpec> exchanges = new LinkedHashMap<>();
 }

@@ -18,8 +18,6 @@ import lombok.experimental.UtilityClass;
  *       ({@value #SIDELINE}, {@value #RETRY}, {@value #UNROUTED}), and a queue name is used under only one
  *       exchange;</li>
  *   <li>every exchange has a type and at least one queue (publish-only exchanges are not supported);</li>
- *   <li>a delayed exchange sets {@code captureUnroutable} (the delayed-message plugin does not support
- *       {@code mandatory});</li>
  *   <li>DIRECT/TOPIC queues have at least one binding key; FANOUT queues have none;</li>
  *   <li>binding keys are non-blank with no surrounding whitespace; TOPIC keys contain no empty words
  *       (e.g. {@code a..b}).</li>
@@ -51,10 +49,6 @@ public class MessagingConfigValidator {
             if (spec == null || spec.getType() == null) {
                 errors.add(String.format("Exchange '%s': type is required", exchange));
                 return;
-            }
-            if (spec.isDelayed() && !spec.isCaptureUnroutable()) {
-                errors.add(String.format("Exchange '%s': a delayed exchange must set captureUnroutable: true, since "
-                        + "the delayed-message plugin cannot report unroutable events", exchange));
             }
             final Map<String, QueueSpec> queues = Objects.requireNonNullElse(spec.getQueues(), Map.of());
             if (queues.isEmpty()) {

@@ -4,7 +4,6 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.appform.dropwizard.actors.TtlConfig;
 import io.appform.dropwizard.actors.actor.ActorConfig;
 import io.appform.dropwizard.actors.actor.ConsumerConfig;
-import io.appform.dropwizard.actors.actor.HaMode;
 import io.appform.dropwizard.actors.actor.QueueType;
 import io.appform.dropwizard.actors.exceptionhandler.config.ExceptionHandlerConfig;
 import io.appform.dropwizard.actors.retry.config.NoRetryConfig;
@@ -22,6 +21,19 @@ import lombok.NoArgsConstructor;
 
 /**
  * A consumer queue bound to an exchange.
+ *
+ * <p>The queue-argument fields ({@link #queueType}, {@link #lazyMode}, {@link #quorumInitialGroupSize},
+ * {@link #ttlConfig}) mirror the ones on {@code ActorConfig}, and are mapped back to it in
+ * {@link #toQueueArgumentsConfig}, so queue arguments are built by the same code as for actors. Queue arguments can't
+ * be changed once the queue exists.
+ *
+ * <p>Not supported:
+ * <ul>
+ *   <li>priority queues, since publishers can't set a message priority;</li>
+ *   <li>{@code ActorConfig}'s {@code haMode}/{@code haParams}: as queue arguments they don't enable mirroring
+ *       (RabbitMQ only mirrors classic queues through policies). For replicated queues use {@link QueueType#QUORUM},
+ *       or a mirroring policy matching the queue names.</li>
+ * </ul>
  */
 @Data
 @Builder
@@ -38,21 +50,33 @@ public class QueueSpec {
     @Builder.Default
     private List<String> bindingKeys = new ArrayList<>();
 
+    /**
+     * Number of consumers (channels) reading this queue in parallel.
+     */
     @Min(1)
     @Max(100)
     @Builder.Default
     private int concurrency = 3;
 
+    /**
+     * Maximum unacknowledged messages delivered to each consumer at a time.
+     */
     @Min(1)
     @Max(100)
     @Builder.Default
     private int prefetchCount = 1;
 
+    /**
+     * In-process retries when the handler throws, before the message is rejected to the sideline queue.
+     */
     @Valid
     @NotNull
     @Builder.Default
     private RetryConfig retryConfig = new NoRetryConfig();
 
+    /**
+     * What to do once retries are exhausted: reject to the sideline queue (default) or ack and drop.
+     */
     private ExceptionHandlerConfig exceptionHandlerConfig;
 
     /**
@@ -69,28 +93,22 @@ public class QueueSpec {
     @Builder.Default
     private boolean retryLaterEnabled = false;
 
-    // Queue arguments below mirror ActorConfig's on purpose (actor config is left untouched), and are mapped back to
-    // it in toQueueArgumentsConfig so arguments are built by the same code as for actors. Priority queues are not
-    // supported, since publishers can't set a message priority.
-
+    /**
+     * Queue type: CLASSIC, CLASSIC_V2 or QUORUM ({@code x-queue-type}).
+     */
     @Builder.Default
     private QueueType queueType = QueueType.CLASSIC;
 
     /**
-     * Classic mirrored queues only (deprecated in RabbitMQ 3.x, removed in 4.x).
+     * Classic queues only: {@code x-queue-mode: lazy}, keeping messages on disk. Ignored by RabbitMQ 3.12+, where
+     * classic queues always behave this way.
      */
-    @Builder.Default
-    private HaMode haMode = HaMode.ALL;
-
-    /**
-     * Classic mirrored queues only (deprecated in RabbitMQ 3.x, removed in 4.x).
-     */
-    @Builder.Default
-    private String haParams = "";
-
     @Builder.Default
     private boolean lazyMode = false;
 
+    /**
+     * Quorum queues only: number of replicas the queue is created with ({@code x-quorum-initial-group-size}).
+     */
     @Builder.Default
     private int quorumInitialGroupSize = 3;
 
@@ -102,16 +120,16 @@ public class QueueSpec {
     private TtlConfig ttlConfig;
 
     /**
-     * Queue-argument view of this spec, so queue arguments (queue type, HA, auto-delete) are built exactly like they
-     * are for actors.
+     * Maps this spec's queue-argument fields to an {@code ActorConfig}, so queue arguments are built by the same code
+     * as for actors.
+     *
+     * @param exchange broker exchange name (required by {@code ActorConfig}, not used for queue arguments)
      */
     @JsonIgnore
     public ActorConfig toQueueArgumentsConfig(final String exchange) {
         return ActorConfig.builder()
                 .exchange(exchange)
                 .queueType(queueType)
-                .haMode(haMode)
-                .haParams(haParams)
                 .lazyMode(lazyMode)
                 .quorumInitialGroupSize(quorumInitialGroupSize)
                 .ttlConfig(ttlConfig)

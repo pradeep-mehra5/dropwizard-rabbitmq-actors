@@ -30,9 +30,12 @@ import okhttp3.Response;
 public class RmqManagementClient {
 
     /**
-     * One binding of a queue: the source exchange and the routing (binding) key.
+     * One binding of a queue.
+     *
+     * @param exchange   the exchange that routes into the queue (the Management API's {@code source} field)
+     * @param routingKey the binding key ({@code ""} for FANOUT)
      */
-    public record Binding(String source, String routingKey) {
+    public record Binding(String exchange, String routingKey) {
     }
 
     private final OkHttpClient httpClient;
