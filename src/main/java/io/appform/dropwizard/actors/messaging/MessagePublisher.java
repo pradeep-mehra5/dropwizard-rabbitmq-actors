@@ -35,7 +35,7 @@ import lombok.extern.slf4j.Slf4j;
  *   <li>without confirms, returned messages are only logged (the publish has already returned).</li>
  * </ul>
  * The delayed-message plugin does not support {@code mandatory}, so on a delayed exchange an unroutable message is
- * not detected: it is dropped silently unless {@code captureUnroutable} is set.
+ * not detected: it is dropped silently.
  *
  * <p>Thread-safe: publishes are serialized on one channel. If the channel gets closed (e.g. a confirm timed out or the
  * broker rejected an operation), it is reopened on the next publish.
@@ -104,7 +104,7 @@ public class MessagePublisher<M> {
      * Publishes {@code message} to the exchange. The routing key comes from the {@link RoutingKeyResolver} (empty for
      * FANOUT).
      *
-     * @throws UnroutableMessageException if no binding matched (publisher confirms on, no {@code captureUnroutable})
+     * @throws UnroutableMessageException if no binding matched (publisher confirms on)
      * @throws IllegalArgumentException   if the routing key is blank or longer than 255 bytes
      * @throws IllegalStateException      if the publisher is not started
      * @throws io.appform.dropwizard.actors.common.RabbitmqActorException if serialization or publishing fails, or the

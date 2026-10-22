@@ -38,13 +38,12 @@ broker don't receive each other's messages.
 ### Messaging config
 
 ```yaml
-messaging:
+messaging:                             # anywhere in your app config; returned from getMessagingConfig
   prefix: myservice.messaging          # default: rabbitmq.messaging; set one per service
   exchanges:
     order_events:
       type: TOPIC                      # DIRECT | TOPIC | FANOUT
       delayed: false                   # x-delayed-message exchange, enables publishWithDelay (see the risk below)
-      captureUnroutable: true          # unmatched messages go to the <prefix>.<exchange>_UNROUTED queue
       publisherConfirms: true          # default; publish waits for the broker's confirm
       queues:
         shipping:
@@ -55,13 +54,14 @@ messaging:
           retryLaterEnabled: true      # MessageContext.retryLater redelivers to this queue only
 ```
 
-Optionally enable the binding drift checks through the Management API on the RabbitMQ config:
+Optionally enable the binding drift checks through the Management API, inside your RabbitMQ (`RMQConfig`) section:
 
 ```yaml
-managementConfig:
-  enabled: true
-  port: 15672
-  secure: false                        # https uses the JVM's default trust store
+rabbit:                                # your RMQConfig section
+  managementConfig:
+    enabled: true
+    port: 15672
+    secure: false                      # https uses the JVM's default trust store
 ```
 
 The Management API is called on the **first** broker, with the AMQP credentials. That user needs a management tag
@@ -69,8 +69,9 @@ The Management API is called on the **first** broker, with the AMQP credentials.
 
 ### Usage
 
-Enable messaging by overriding `RabbitmqActorBundle.getMessagingConfig`, then register publishers and handlers
-before the application starts:
+Enable messaging by overriding `RabbitmqActorBundle.getMessagingConfig`, then register publishers and handlers in
+`Application.run`. Registering from a managed object's `start()` is too late: messaging is managed by the bundle and
+starts first.
 
 ```java
 Messaging messaging = bundle.getMessaging();
@@ -109,21 +110,19 @@ make message classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreU
     the same service is not supported;
   * a DIRECT/TOPIC queue has no binding keys, a FANOUT queue has binding keys, or a binding key is blank, has
     surrounding whitespace or (TOPIC) an empty word;
-  * a queue name ends with `_SIDELINE`, `_RETRY` or `_UNROUTED`, or an exchange name ends with `_SIDELINE` or
-    `_UNROUTED` (reserved for derived names);
+  * a queue name ends with `_SIDELINE` or `_RETRY`, or an exchange name ends with `_SIDELINE` (reserved for derived
+    names);
   * a configured queue has no handler;
   * a publisher or handler refers to an unknown exchange or queue.
 * **Topology first.** All exchanges, queues and bindings are declared before any publisher or consumer starts.
-* **No silent loss.** Publishes use `mandatory`. With publisher confirms (the default), a message no binding matches
-  fails with `UnroutableMessageException`, and a publish the broker did not accept fails too. With
-  `captureUnroutable`, unmatched messages are parked in the `<prefix>.<exchange>_UNROUTED` queue instead.
+* **No silent loss on normal exchanges.** Publishes use `mandatory`. With publisher confirms (the default), a message
+  no binding matches fails with `UnroutableMessageException`, and a publish the broker did not accept fails too.
   * Confirms cost a broker round trip per publish, and publishes on one exchange are serialized. Set
-    `publisherConfirms: false` for fire-and-forget throughput; unroutable messages are then only logged.
+    `publisherConfirms: false` for fire-and-forget throughput; unroutable messages are then only logged and dropped.
   * A confirm timeout can leave the caller unsure whether the broker got the message, so retries can duplicate it.
     Consumers should be idempotent.
   * **Risk with delayed exchanges:** the delayed-message plugin does not support `mandatory`, so a message that no
-    binding matches is *not* detected, even with confirms, and is dropped silently. Set `captureUnroutable: true` on
-    delayed exchanges to keep such messages.
+    binding matches is *not* detected, even with confirms, and is dropped silently.
   * A publisher whose channel gets closed (confirm timeout, broker error) reopens it on the next publish.
   * Routing keys are limited to 255 bytes.
 * **Retries stay local.** `retryLater` goes through a private per-queue delayed exchange (`<queue>_RETRY`), so a
@@ -140,12 +139,10 @@ make message classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreU
 * Adding queues or exchanges is always safe.
 * A queue's binding keys and exchange are fixed once it exists. With `managementConfig.enabled`, changing them
   fails startup; without it, old bindings silently remain. Use a new queue instead.
-* Queue arguments (queue type, lazy mode, TTL) and exchange settings (`type`, `delayed`, `captureUnroutable`)
+* Queue arguments (queue type, lazy mode, TTL) and exchange settings (`type`, `delayed`)
   can't be changed on an existing queue/exchange (the broker rejects the redeclare with `406 PRECONDITION_FAILED`).
 * Removing a queue from the config does not delete it on the broker; it stays bound and keeps collecting messages.
   Delete or unbind it manually.
-* The `<prefix>.<exchange>_UNROUTED` queue has no auto-delete TTL, even when the exchange's queues set `ttlConfig`.
-  It is not removed when idle (e.g. in feature environments); delete it manually.
 
 ### Not supported (yet)
 These actor features have no messaging equivalent; use an actor if you need them.

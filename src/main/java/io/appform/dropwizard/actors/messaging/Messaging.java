@@ -36,7 +36,7 @@ import lombok.extern.slf4j.Slf4j;
  * <ol>
  *   <li>checks that every configured queue has a handler (every exchange has at least one queue, so an exchange is
  *       only published to when this service also consumes from it);</li>
- *   <li>declares the whole topology (exchanges, queues, bindings, sideline, retry and unrouted capture), so bindings
+ *   <li>declares the whole topology (exchanges, queues, bindings, sideline and retry), so bindings
  *       exist before the first publish;</li>
  *   <li>starts publishers, then consumers.</li>
  * </ol>
@@ -243,7 +243,7 @@ public class Messaging implements Managed {
     }
 
     private MessagingNames.ExchangeNames names(final String exchange) {
-        return MessagingNames.forExchange(config.getPrefix(), exchange);
+        return MessagingNames.forExchange(exchange);
     }
 
     private ExchangeSpec exchangeSpec(final String exchange) {

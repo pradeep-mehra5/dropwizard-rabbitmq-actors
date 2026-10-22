@@ -15,7 +15,7 @@ import lombok.experimental.UtilityClass;
  * <ul>
  *   <li>at least one exchange is configured;</li>
  *   <li>exchange and queue names are non-blank, don't end with a suffix the library uses for derived names
- *       ({@value #SIDELINE}, {@value #RETRY}, {@value #UNROUTED}), and a queue name is used under only one
+ *       ({@value #SIDELINE}, {@value #RETRY}), and a queue name is used under only one
  *       exchange;</li>
  *   <li>every exchange has a type and at least one queue (publish-only exchanges are not supported);</li>
  *   <li>DIRECT/TOPIC queues have at least one binding key; FANOUT queues have none;</li>
@@ -28,7 +28,6 @@ public class MessagingConfigValidator {
 
     public static final String SIDELINE = "_SIDELINE";
     public static final String RETRY = "_RETRY";
-    public static final String UNROUTED = "_UNROUTED";
 
     public List<String> validate(final MessagingConfig config) {
         final List<String> errors = new ArrayList<>();
@@ -42,9 +41,8 @@ public class MessagingConfigValidator {
                 errors.add("Exchange name must not be blank");
                 return;
             }
-            if (exchange.endsWith(SIDELINE) || exchange.endsWith(UNROUTED)) {
-                errors.add(String.format("Exchange '%s': names ending with %s or %s are reserved", exchange,
-                        SIDELINE, UNROUTED));
+            if (exchange.endsWith(SIDELINE)) {
+                errors.add(String.format("Exchange '%s': names ending with %s are reserved", exchange, SIDELINE));
             }
             if (spec == null || spec.getType() == null) {
                 errors.add(String.format("Exchange '%s': type is required", exchange));
@@ -71,9 +69,8 @@ public class MessagingConfigValidator {
             errors.add(String.format("Exchange '%s': queue name must not be blank", exchange));
             return;
         }
-        if (queue.endsWith(SIDELINE) || queue.endsWith(RETRY) || queue.endsWith(UNROUTED)) {
-            errors.add(String.format("Queue '%s': names ending with %s, %s or %s are reserved", queue, SIDELINE,
-                    RETRY, UNROUTED));
+        if (queue.endsWith(SIDELINE) || queue.endsWith(RETRY)) {
+            errors.add(String.format("Queue '%s': names ending with %s or %s are reserved", queue, SIDELINE, RETRY));
         }
         final String previousOwner = queueOwner.putIfAbsent(queue, exchange);
         if (previousOwner != null) {

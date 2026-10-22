@@ -17,23 +17,16 @@ class MessagingNames {
     /**
      * Names for one exchange.
      *
-     * @param logical          config key, used in code, logs and metrics
-     * @param broker           exchange name on the broker ({@code <namespace>.<logical>})
-     * @param sideline         dead-letter exchange shared by the exchange's queues (DIRECT, routed by queue name)
-     * @param unroutedExchange alternate exchange receiving unroutable messages (fanout)
-     * @param unroutedQueue    queue bound to {@code unroutedExchange} ({@code <namespace>.<prefix>.<logical>_UNROUTED})
+     * @param logical  config key, used in code, logs and metrics
+     * @param broker   exchange name on the broker ({@code <namespace>.<logical>})
+     * @param sideline dead-letter exchange shared by the exchange's queues (DIRECT, routed by queue name)
      */
-    record ExchangeNames(String logical, String broker, String sideline, String unroutedExchange,
-                         String unroutedQueue) {
+    record ExchangeNames(String logical, String broker, String sideline) {
     }
 
-    ExchangeNames forExchange(final String prefix, final String logical) {
+    ExchangeNames forExchange(final String logical) {
         final String broker = NamingUtils.prefixWithNamespace(logical);
-        return new ExchangeNames(logical,
-                broker,
-                broker + MessagingConfigValidator.SIDELINE,
-                broker + MessagingConfigValidator.UNROUTED,
-                NamingUtils.queueName(prefix, logical + MessagingConfigValidator.UNROUTED));
+        return new ExchangeNames(logical, broker, broker + MessagingConfigValidator.SIDELINE);
     }
 
     /**

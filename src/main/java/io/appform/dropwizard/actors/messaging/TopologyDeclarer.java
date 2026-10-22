@@ -15,7 +15,6 @@ import lombok.extern.slf4j.Slf4j;
 /**
  * Declares an exchange and everything bound to it, in this order:
  * <ol>
- *   <li>alternate exchange + unrouted queue (if {@code captureUnroutable});</li>
  *   <li>the exchange (optionally {@code x-delayed-message});</li>
  *   <li>the shared sideline (dead-letter) exchange (DIRECT);</li>
  *   <li>per queue: sideline queue, main queue (dead-lettering to its sideline queue), bindings (drift-guarded) and the
@@ -70,28 +69,19 @@ class TopologyDeclarer {
 
     private void declareExchange(final Channel channel, final ExchangeNames names, final ExchangeSpec spec)
             throws IOException {
-        // Exchange arguments are immutable: changing any of them on an existing exchange fails the redeclare (406).
-        final Map<String, Object> exchangeArgs = new HashMap<>();
-
-        // 1. Optional capture of unroutable messages. The alternate exchange must exist before the exchange that
-        //    points to it.
-        if (spec.isCaptureUnroutable()) {
-            declareUnrouted(channel, names);
-            exchangeArgs.put("alternate-exchange", names.unroutedExchange());
-        }
-
-        // 2. The exchange itself, durable and never auto-deleted. A delayed exchange is an x-delayed-message exchange
+        // 1. The exchange itself, durable and never auto-deleted. A delayed exchange is an x-delayed-message exchange
         //    that holds each message for its x-delay, then routes it like the configured type (x-delayed-type).
+        //    Exchange type and arguments are immutable: changing them on an existing exchange fails the redeclare (406).
         if (spec.isDelayed()) {
-            exchangeArgs.put(DELAYED_TYPE_ARG, spec.getType().getAmqpType());
-            channel.exchangeDeclare(names.broker(), DELAYED_EXCHANGE_TYPE, true, false, exchangeArgs);
+            channel.exchangeDeclare(names.broker(), DELAYED_EXCHANGE_TYPE, true, false,
+                    Map.of(DELAYED_TYPE_ARG, spec.getType().getAmqpType()));
         } else {
-            channel.exchangeDeclare(names.broker(), spec.getType().getAmqpType(), true, false, exchangeArgs);
+            channel.exchangeDeclare(names.broker(), spec.getType().getAmqpType(), true);
         }
         log.info("Declared exchange {} (broker {}) type={} delayed={}", names.logical(), names.broker(),
                 spec.getType(), spec.isDelayed());
 
-        // 3. The sideline (dead-letter) exchange shared by the exchange's queues. Always DIRECT, whatever the exchange
+        // 2. The sideline (dead-letter) exchange shared by the exchange's queues. Always DIRECT, whatever the exchange
         //    type: each queue dead-letters with its own name as routing key, reaching only its own sideline queue.
         channel.exchangeDeclare(names.sideline(), ExchangeType.DIRECT.getAmqpType(), true);
     }
@@ -173,19 +163,5 @@ class TopologyDeclarer {
         args.remove(HA_MODE_ARG);
         args.remove(HA_PARAMS_ARG);
         return args;
-    }
-
-    /**
-     * Declares the alternate exchange (FANOUT, so every unroutable message is caught whatever its routing key) and its
-     * single queue.
-     *
-     * <p>The unrouted queue is declared without arguments, so it has no auto-delete TTL: unlike the exchange's queues,
-     * it is not removed when idle (e.g. in feature environments) and has to be deleted manually.
-     */
-    private void declareUnrouted(final Channel channel, final ExchangeNames names) throws IOException {
-        channel.exchangeDeclare(names.unroutedExchange(), ExchangeType.FANOUT.getAmqpType(), true);
-        channel.queueDeclare(names.unroutedQueue(), true, false, false, Map.of());
-        channel.queueBind(names.unroutedQueue(), names.unroutedExchange(), "");
-        log.info("Declared unrouted capture {} -> {}", names.unroutedExchange(), names.unroutedQueue());
     }
 }

@@ -34,25 +34,16 @@ public class ExchangeSpec {
      * messages can be published with a delay.
      *
      * <p><b>Risk:</b> the plugin does not support the {@code mandatory} flag, so the publisher can't detect a message
-     * that no binding matches, even with publisher confirms. Such a message is dropped silently unless
-     * {@link #captureUnroutable} is also set (whether the plugin honours the alternate exchange is yet to be
-     * verified).
+     * that no binding matches, even with publisher confirms. Such a message is dropped silently.
      */
     @Builder.Default
     private boolean delayed = false;
 
     /**
-     * Declare an alternate exchange ({@code <exchange>_UNROUTED}, fanout) with a queue that receives every message
-     * no binding matched, instead of the broker dropping it. Exchange arguments are immutable: changing this on an
-     * existing exchange requires recreating the exchange.
-     */
-    @Builder.Default
-    private boolean captureUnroutable = false;
-
-    /**
      * Wait for the broker's publisher confirm on every publish (default). A publish then fails if the broker did not
-     * accept it, or with {@code UnroutableMessageException} if no binding matched (and it was not captured by an
-     * alternate exchange). Costs a broker round trip per publish; disable for fire-and-forget throughput.
+     * accept it, or with {@code UnroutableMessageException} if no binding matched (non-delayed exchanges). Costs a
+     * broker round trip per publish; disable for fire-and-forget throughput, at the price of unroutable messages being
+     * only logged.
      */
     @Builder.Default
     private boolean publisherConfirms = true;
