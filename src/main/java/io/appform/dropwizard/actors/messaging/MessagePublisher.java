@@ -188,9 +188,11 @@ public class MessagePublisher<M> {
             synchronized (lock) {
                 Preconditions.checkState(started, "Publisher for exchange '%s' is not started", names.logical());
 
-                // A confirm timeout or a broker error closes the channel; reopen it rather than failing every publish
-                // until restart.
+                // A confirm timeout or a channel-level broker error closes the channel for good; reopen it rather
+                // than failing every publish until restart. A connection failure is different: automatic recovery
+                // restores this same channel, so fail fast until it does (see ChannelRecovery).
                 if (channel == null || !channel.isOpen()) {
+                    ChannelRecovery.failIfAwaitingConnectionRecovery(channel, "exchange '" + names.logical() + "'");
                     log.warn("Publish channel for exchange {} is closed; reopening", names.logical());
                     openChannel();
                 }
@@ -234,11 +236,29 @@ public class MessagePublisher<M> {
      * Must be called while holding {@link #lock}.
      */
     private void openChannel() throws IOException {
+        discardChannel();
         channel = connection.newChannel();
         if (spec.isPublisherConfirms()) {
             channel.confirmSelect();
         }
         channel.addReturnListener(this::onReturn);
+    }
+
+    /**
+     * Must be called while holding {@link #lock}. Aborts the current channel before it is replaced. With automatic
+     * connection recovery, a channel closed by a connection failure would otherwise be restored by the client once the
+     * connection recovers, and stay open on the connection with nothing using it.
+     */
+    private void discardChannel() {
+        if (channel == null) {
+            return;
+        }
+        try {
+            channel.abort();
+        } catch (Exception e) {
+            log.debug("Error aborting replaced channel", e);
+        }
+        channel = null;
     }
 
     private void onReturn(final Return returned) {

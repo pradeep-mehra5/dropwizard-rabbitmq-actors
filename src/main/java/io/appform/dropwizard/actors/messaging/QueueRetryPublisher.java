@@ -86,6 +86,7 @@ class QueueRetryPublisher {
             synchronized (lock) {
                 Preconditions.checkState(started, "Retry publisher for queue '%s' is not started", brokerQueue);
                 if (channel == null || !channel.isOpen()) {
+                    ChannelRecovery.failIfAwaitingConnectionRecovery(channel, "queue '" + brokerQueue + "'");
                     log.warn("Retry channel for queue {} is closed; reopening", brokerQueue);
                     openChannel();
                 }
@@ -110,9 +111,27 @@ class QueueRetryPublisher {
      * Must be called while holding {@link #lock}.
      */
     private void openChannel() throws IOException {
+        discardChannel();
         channel = connection.newChannel();
         if (confirms) {
             channel.confirmSelect();
         }
+    }
+
+    /**
+     * Must be called while holding {@link #lock}. Aborts the current channel before it is replaced. With automatic
+     * connection recovery, a channel closed by a connection failure would otherwise be restored by the client once the
+     * connection recovers, and stay open on the connection with nothing using it.
+     */
+    private void discardChannel() {
+        if (channel == null) {
+            return;
+        }
+        try {
+            channel.abort();
+        } catch (Exception e) {
+            log.debug("Error aborting replaced channel", e);
+        }
+        channel = null;
     }
 }
