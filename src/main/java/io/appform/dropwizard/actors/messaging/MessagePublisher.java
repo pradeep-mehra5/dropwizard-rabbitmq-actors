@@ -182,6 +182,8 @@ public class MessagePublisher<M> {
 
             // The lock is held until the confirm arrives: one channel, one publish in flight at a time. That keeps the
             // returned-message check below unambiguous, at the cost of serializing publishes on this exchange.
+            // Without confirms it is still needed (and held only for basicPublish): it guards reopening the channel
+            // and racing with stop(), so no channel is leaked or used while being closed.
             synchronized (lock) {
                 Preconditions.checkState(started, "Publisher for exchange '%s' is not started", names.logical());
 

@@ -54,9 +54,20 @@ public class Messaging implements Managed {
     private final ExceptionHandlingFactory exceptionHandlingFactory;
     private final TopologyDeclarer topologyDeclarer;
 
+    /**
+     * Lifecycle: publishers and handlers are registered while {@code NEW}; {@link #start()} moves to {@code STARTED}.
+     * Once {@code STOPPED} (by {@link #stop()} or a failed start) it can't be restarted: the underlying consumers keep
+     * their old channel handlers, so a restart would leave stale ones behind.
+     */
+    private enum State {
+        NEW,
+        STARTED,
+        STOPPED
+    }
+
     private final List<MessagePublisher<?>> publishers = new ArrayList<>();
     private final Map<String, QueueConsumer<?>> consumers = new LinkedHashMap<>();
-    private volatile boolean started;
+    private volatile State state = State.NEW;
 
     public Messaging(final MessagingConfig config,
                      final RMQConfig rmqConfig,
@@ -83,7 +94,14 @@ public class Messaging implements Managed {
     }
 
     /**
-     * Publisher for a DIRECT or TOPIC exchange.
+     * Creates a publisher for a DIRECT or TOPIC exchange. Must be called before {@link #start()}. Each call opens its
+     * own channel when messaging starts, so create one publisher per exchange (or per message type) and reuse it.
+     *
+     * @param exchange           exchange name as configured under {@code messaging.exchanges}
+     * @param routingKeyResolver derives each message's routing key
+     * @throws IllegalArgumentException if the exchange is not configured, or is FANOUT (use
+     *                                  {@link #publisher(String)})
+     * @throws IllegalStateException    if messaging has already started or stopped
      */
     public synchronized <M> MessagePublisher<M> publisher(final String exchange,
                                                         final RoutingKeyResolver<M> routingKeyResolver) {
@@ -92,14 +110,27 @@ public class Messaging implements Managed {
     }
 
     /**
-     * Publisher for a FANOUT exchange.
+     * Creates a publisher for a FANOUT exchange (no routing key). Must be called before {@link #start()}. Each call
+     * opens its own channel when messaging starts, so create one publisher per exchange and reuse it.
+     *
+     * @param exchange exchange name as configured under {@code messaging.exchanges}
+     * @throws IllegalArgumentException if the exchange is not configured, or is not FANOUT
+     * @throws IllegalStateException    if messaging has already started or stopped
      */
     public synchronized <M> MessagePublisher<M> publisher(final String exchange) {
         return register(exchange, null);
     }
 
     /**
-     * Registers the handler for a configured queue. Each queue has exactly one handler.
+     * Registers the handler for a configured queue. Must be called before {@link #start()}. Every configured queue
+     * needs exactly one handler, or {@link #start()} fails.
+     *
+     * @param exchange    exchange name as configured under {@code messaging.exchanges}
+     * @param queue       queue name as configured under that exchange's {@code queues}
+     * @param messageType class messages are deserialized into
+     * @param handler     handles each message
+     * @throws IllegalArgumentException if the exchange or queue is not configured, or the queue already has a handler
+     * @throws IllegalStateException    if messaging has already started or stopped
      */
     public synchronized <M> void consumer(final String exchange,
                                           final String queue,
@@ -123,6 +154,8 @@ public class Messaging implements Managed {
     @Override
     public synchronized void start() throws Exception {
         checkNotStarted();
+
+        // 1. Every configured queue needs a handler; checked before touching the broker.
         final List<String> unhandled = config.getExchanges().values().stream()
                 .flatMap(spec -> spec.getQueues().keySet().stream())
                 .filter(queue -> !consumers.containsKey(queue))
@@ -134,9 +167,11 @@ public class Messaging implements Managed {
         final List<MessagePublisher<?>> startedPublishers = new ArrayList<>();
         final List<QueueConsumer<?>> startedConsumers = new ArrayList<>();
         try {
+            // 2. The whole topology, so every binding exists before the first publish or consume.
             for (final Map.Entry<String, ExchangeSpec> entry : config.getExchanges().entrySet()) {
                 topologyDeclarer.declare(names(entry.getKey()), entry.getValue(), producerConnection(entry.getValue()));
             }
+            // 3. Publishers before consumers: a handler may publish as soon as it receives its first message.
             for (final MessagePublisher<?> publisher : publishers) {
                 publisher.start();
                 startedPublishers.add(publisher);
@@ -146,19 +181,28 @@ public class Messaging implements Managed {
                 startedConsumers.add(consumer);
             }
         } catch (Exception e) {
+            // 4. On failure, stop only what actually started, then fail.
             log.error("Messaging failed to start; stopping what was started", e);
+            state = State.STOPPED;
             stopAll(startedConsumers, startedPublishers);
             throw e;
         }
-        started = true;
+        state = State.STARTED;
         log.info("Messaging started: exchanges={} publishers={} consumers={}",
                 config.getExchanges().keySet(), publishers.size(), consumers.keySet());
     }
 
+    /**
+     * Stops consumers, then publishers. Messaging can't be started again afterwards.
+     */
     @Override
     public synchronized void stop() throws Exception {
+        if (state == State.STOPPED) {
+            return;
+        }
+        state = State.STOPPED;
         stopAll(consumers.values(), publishers);
-        started = false;
+        log.info("Messaging stopped: exchanges={}", config.getExchanges().keySet());
     }
 
     /**
@@ -214,6 +258,8 @@ public class Messaging implements Managed {
     }
 
     private void checkNotStarted() {
-        Preconditions.checkState(!started, "Publishers and handlers must be registered before messaging starts");
+        Preconditions.checkState(state != State.STOPPED, "Messaging is stopped and can't be restarted");
+        Preconditions.checkState(state == State.NEW,
+                "Publishers and handlers must be registered before messaging starts");
     }
 }

@@ -91,6 +91,9 @@ public abstract class RabbitmqActorBundle<T extends Configuration> implements Co
     /**
      * Exchange-centric messaging.
      *
+     * <p>Register publishers and handlers in {@code Application.run}: registering from a managed object's
+     * {@code start()} is too late, because messaging is managed by this bundle and starts first.
+     *
      * @throws IllegalStateException when messaging is not configured
      */
     public Messaging getMessaging() {
