@@ -27,6 +27,10 @@ A queue belongs either to an actor or to messaging, never both. Messaging queues
 (`rabbitmq.messaging` by default), so they don't collide with actor queues by default. Don't reuse an actor's exchange
 or queue name in the messaging config.
 
+Set a `prefix` per service (e.g. `myservice.messaging`). With the shared default, two services configuring the same
+queue name would share one broker queue: their consumers would compete for its events, and with different exchanges
+the queue would be bound to both.
+
 Exchange names in the config are logical names used in code. On the broker, exchanges and queues are prefixed with
 the namespace (`NAMESPACE_ENV_NAME` / `rmq.actors.namespace`) when one is set, so feature environments sharing a
 broker don't receive each other's events.
@@ -35,7 +39,7 @@ broker don't receive each other's events.
 
 ```yaml
 messaging:
-  prefix: myservice.messaging          # default: rabbitmq.messaging
+  prefix: myservice.messaging          # default: rabbitmq.messaging; set one per service
   exchanges:
     order_events:
       type: TOPIC                      # DIRECT | TOPIC | FANOUT
@@ -58,11 +62,10 @@ managementConfig:
   enabled: true
   port: 15672
   secure: false                        # https uses the JVM's default trust store
-  failOnManagementUnavailable: true    # strict (default): startup fails if the API can't be read
 ```
 
 The Management API is called on the **first** broker, with the AMQP credentials. That user needs a management tag
-(e.g. `monitoring`).
+(e.g. `monitoring`). If the API can't be read while the checks are enabled, startup fails.
 
 ### Usage
 

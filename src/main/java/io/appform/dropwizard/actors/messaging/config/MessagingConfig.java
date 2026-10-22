@@ -36,7 +36,8 @@ public class MessagingConfig {
     /**
      * Prefix for broker queue names: {@code <namespace>.<prefix>.<queue>}. The default differs from the actors'
      * default prefix, so messaging queues and actor queues don't collide by default. Don't set it to an actor prefix
-     * while reusing an actor's queue name.
+     * while reusing an actor's queue name. Set one per service (e.g. {@code myservice.messaging}): with the shared
+     * default, two services using the same queue name would share one broker queue.
      */
     @NotEmpty
     @Builder.Default

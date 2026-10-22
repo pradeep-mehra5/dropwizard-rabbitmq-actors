@@ -7,28 +7,27 @@ import io.appform.dropwizard.actors.connectivity.BindingKeyMatcher;
 import io.appform.dropwizard.actors.connectivity.RmqManagementClient;
 import io.appform.dropwizard.actors.connectivity.RmqManagementClient.Binding;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * Applies a queue's bindings to its exchange, guarding against binding drift when the RabbitMQ Management API is
  * enabled ({@code managementConfig.enabled}).
  *
  * <p>AMQP bindings are additive and this library never unbinds, so on a durable queue a changed config would
- * silently leave stale bindings behind. With the Management API enabled, one read of the queue's bindings decides:
+ * silently leave stale bindings behind. With the Management API enabled, the queue's current bindings are looked up
+ * once, and:
  * <ul>
  *   <li><b>stale exchange:</b> the queue must not be bound to any exchange other than its own (plus its own retry
  *       exchange). Checked before anything is declared or bound;</li>
  *   <li><b>immutable binding keys:</b> if the queue already has bindings from the exchange, they must equal the
  *       configured keys exactly, and nothing is (re)bound;</li>
- *   <li><b>first-creation race:</b> on first creation the keys are bound and re-read; a divergent concurrent creator
- *       (e.g. two instances with different configs) fails startup.</li>
+ *   <li><b>concurrent creator:</b> on first creation the keys are bound and looked up again; a concurrent creator with
+ *       a different config (other binding keys, or another exchange) fails startup.</li>
  * </ul>
- * With the Management API disabled the keys are bound additively, without checks.
+ * If the Management API can't be read, startup fails. With the Management API disabled, the keys are bound additively
+ * without checks.
  */
-@Slf4j
 class BindingGuard {
 
     /**
@@ -48,11 +47,30 @@ class BindingGuard {
     }
 
     /**
-     * Result of reading a queue's bindings. {@code bindings} is empty when the queue does not exist yet;
-     * {@code available} is false when the Management API was unreachable and lenient mode allows proceeding without
-     * the checks.
+     * A queue's bindings as read from the Management API.
+     *
+     * @param queueExists false when the queue does not exist yet (HTTP 404); {@code bindings} is then empty
+     * @param bindings    the queue's bindings
      */
-    private record Read(boolean available, Optional<List<Binding>> bindings) {
+    private record BindingsLookup(boolean queueExists, List<Binding> bindings) {
+
+        static BindingsLookup found(final List<Binding> bindings) {
+            return new BindingsLookup(true, bindings);
+        }
+
+        static BindingsLookup queueNotFound() {
+            return new BindingsLookup(false, List.of());
+        }
+
+        /**
+         * Binding keys from {@code exchange}; empty when the queue does not exist or has no binding from it.
+         */
+        List<String> keysFrom(final String exchange) {
+            return bindings.stream()
+                    .filter(binding -> binding.exchange().equals(exchange))
+                    .map(Binding::routingKey)
+                    .collect(Collectors.toList());
+        }
     }
 
     private final RMQConfig rmqConfig;
@@ -68,93 +86,125 @@ class BindingGuard {
     }
 
     /**
-     * @param queue               broker queue name
-     * @param exchange            broker exchange name
-     * @param otherAllowedSources other exchanges the queue may legitimately be bound to (its own retry exchange)
+     * Declares {@code brokerQueue} and binds it to {@code brokerExchange} with {@code bindingKeys}, applying the drift
+     * checks when the Management API is enabled.
+     *
+     * @param brokerQueue           queue name on the broker (namespaced)
+     * @param brokerExchange        exchange name on the broker (namespaced)
+     * @param bindingKeys           configured binding keys
+     * @param allowedOtherExchanges other exchanges the queue may legitimately be bound to (its own retry exchange)
+     * @param declareQueue          declares the queue (idempotent)
+     * @param bindQueue             binds the queue to the exchange with one key
      */
-    void ensureBindings(final String queue,
-                        final String exchange,
+    void ensureBindings(final String brokerQueue,
+                        final String brokerExchange,
                         final List<String> bindingKeys,
-                        final Set<String> otherAllowedSources,
-                        final QueueDeclarer declarer,
-                        final QueueBinder binder) throws Exception {
+                        final Set<String> allowedOtherExchanges,
+                        final QueueDeclarer declareQueue,
+                        final QueueBinder bindQueue) throws Exception {
         if (client == null) {
-            declarer.declare();
-            bindAll(bindingKeys, binder);
+            // Drift checks disabled: bindings are additive, so changed keys or exchanges leave old bindings behind.
+            declareAndBind(declareQueue, bindingKeys, bindQueue);
             return;
         }
-        final Read existing = read(queue, "read");
-        if (existing.available() && existing.bindings().isPresent()) {
-            verifyNoStaleExchange(queue, exchange, otherAllowedSources, existing.bindings().get());
-        }
-        declarer.declare();
-        if (!existing.available()) {
-            bindAll(bindingKeys, binder);
-            return;
-        }
-        final List<String> existingKeys = keysFrom(exchange, existing.bindings());
-        if (!existingKeys.isEmpty()) {
-            assertMatch(bindingKeys, existingKeys, String.format(
+
+        // Read the current bindings before touching anything, so a drifted queue fails without being modified.
+        final BindingsLookup current = lookupBindings(brokerQueue, "read");
+        rejectStaleExchanges(brokerQueue, brokerExchange, allowedOtherExchanges, current);
+        declareQueue.declare();
+
+        final List<String> currentKeys = current.keysFrom(brokerExchange);
+        if (!currentKeys.isEmpty()) {
+            // Existing queue: its bindings are already in place. Binding the configured keys would only add new ones
+            // and never remove old ones, so require an exact match instead of binding.
+            requireSameKeys(bindingKeys, currentKeys, String.format(
                     "Binding keys are immutable for an existing queue. Mismatch for queue '%s' on exchange '%s'. "
-                            + "To change them, use a new queue.", queue, exchange));
+                            + "To change them, use a new queue.", brokerQueue, brokerExchange));
             return;
         }
-        // First creation (or no bindings from this exchange yet): bind, then re-read to detect a divergent
-        // concurrent creator.
-        bindAll(bindingKeys, binder);
-        final Read reread = read(queue, "re-read");
-        if (reread.available() && reread.bindings().isPresent()) {
-            assertMatch(bindingKeys, keysFrom(exchange, reread.bindings()), String.format(
-                    "Binding keys mismatch after first-creation bind for queue '%s' on exchange '%s' "
-                            + "(likely a concurrent creator with different binding keys).", queue, exchange));
-        }
+
+        // New queue (or not yet bound to this exchange): bind, then read again in case another instance created the
+        // same queue at the same time with a different config.
+        bindAll(bindingKeys, bindQueue);
+        rejectConcurrentCreator(brokerQueue, brokerExchange, bindingKeys, allowedOtherExchanges);
     }
 
-    private static void verifyNoStaleExchange(final String queue,
-                                              final String exchange,
-                                              final Set<String> otherAllowed,
-                                              final List<Binding> bindings) {
-        final Set<String> stale = bindings.stream()
+    /**
+     * Fails if the queue is bound to an exchange other than its own (and the allowed ones): left over from moving the
+     * queue to another exchange, or another service/instance using the same queue name on a different exchange.
+     */
+    private static void rejectStaleExchanges(final String queue,
+                                             final String exchange,
+                                             final Set<String> allowedOtherExchanges,
+                                             final BindingsLookup current) {
+        // The default (nameless) exchange binding every queue has is already excluded by the client.
+        final Set<String> staleExchanges = current.bindings().stream()
                 .map(Binding::exchange)
-                .filter(source -> !source.equals(exchange) && !otherAllowed.contains(source))
+                .filter(source -> !source.equals(exchange) && !allowedOtherExchanges.contains(source))
                 .collect(Collectors.toSet());
-        if (!stale.isEmpty()) {
+        if (!staleExchanges.isEmpty()) {
             throw new IllegalStateException(String.format(
-                    "Queue '%s' is bound to unexpected exchange(s) %s besides its configured exchange '%s'. "
-                            + "This is a stale binding left by moving the queue to another exchange. "
-                            + "To change a queue's exchange, use a new queue.", queue, stale, exchange));
+                    "Queue '%s' is bound to unexpected exchange(s) %s besides its configured exchange '%s': either a "
+                            + "stale binding left by moving the queue to another exchange (use a new queue instead), "
+                            + "or another service/instance using the same queue name on a different exchange (give "
+                            + "each service its own messaging prefix).", queue, staleExchanges, exchange));
         }
     }
 
-    private static List<String> keysFrom(final String exchange, final Optional<List<Binding>> bindings) {
-        return bindings.orElse(List.of()).stream()
-                .filter(binding -> binding.exchange().equals(exchange))
-                .map(Binding::routingKey)
-                .collect(Collectors.toList());
+    /**
+     * After a first-creation bind, looks the bindings up again: another instance creating the same queue at the same
+     * time with a different config would show up as extra keys, or as a binding from another exchange.
+     */
+    private void rejectConcurrentCreator(final String queue,
+                                         final String exchange,
+                                         final List<String> bindingKeys,
+                                         final Set<String> allowedOtherExchanges) {
+        final BindingsLookup afterBind = lookupBindings(queue, "re-read");
+        if (!afterBind.queueExists()) {
+            // Deleted right after we declared it; nothing left to compare.
+            return;
+        }
+        rejectStaleExchanges(queue, exchange, allowedOtherExchanges, afterBind);
+        requireSameKeys(bindingKeys, afterBind.keysFrom(exchange), String.format(
+                "Binding keys mismatch after first-creation bind for queue '%s' on exchange '%s' "
+                        + "(likely a concurrent creator with different binding keys).", queue, exchange));
     }
 
-    private Read read(final String queue, final String phase) {
+    /**
+     * Looks up the queue's bindings. Fails startup if the Management API can't be read: the drift checks are enabled,
+     * so proceeding without them could silently leave stale bindings.
+     *
+     * @param phase "read" or "re-read", for messages
+     */
+    private BindingsLookup lookupBindings(final String queue, final String phase) {
         try {
-            return new Read(true, client.fetchBindings(vhost(), queue));
+            return client.fetchBindings(vhost(), queue)
+                    .map(BindingsLookup::found)
+                    .orElseGet(BindingsLookup::queueNotFound);
         } catch (RuntimeException e) {
-            if (rmqConfig.getManagementConfig().isFailOnManagementUnavailable()) {
-                throw new IllegalStateException(String.format(
-                        "Unable to %s bindings from RabbitMQ Management API for queue '%s' (strict mode). "
-                                + "Ensure the management plugin is enabled and reachable.", phase, queue), e);
-            }
-            log.warn("Management API unavailable on {} for queue {}; proceeding without binding drift checks",
-                    phase, queue, e);
-            return new Read(false, Optional.empty());
+            throw new IllegalStateException(String.format(
+                    "Unable to %s bindings from RabbitMQ Management API for queue '%s'. Ensure the management plugin "
+                            + "is enabled and reachable, or disable managementConfig to skip the binding drift "
+                            + "checks.", phase, queue), e);
         }
     }
 
-    private static void bindAll(final List<String> keys, final QueueBinder binder) throws Exception {
+    private static void declareAndBind(final QueueDeclarer declareQueue,
+                                       final List<String> bindingKeys,
+                                       final QueueBinder bindQueue) throws Exception {
+        declareQueue.declare();
+        bindAll(bindingKeys, bindQueue);
+    }
+
+    private static void bindAll(final List<String> keys, final QueueBinder bindQueue) throws Exception {
         for (final String key : keys) {
-            binder.bind(key);
+            bindQueue.bind(key);
         }
     }
 
-    private static void assertMatch(final List<String> configured, final List<String> actual, final String reason) {
+    private static void requireSameKeys(final List<String> configured,
+                                        final List<String> actual,
+                                        final String reason) {
         if (!BindingKeyMatcher.matches(configured, actual)) {
             throw new IllegalStateException(String.format("%s configured=%s, actual=%s", reason,
                     BindingKeyMatcher.normalize(configured), BindingKeyMatcher.normalize(actual)));

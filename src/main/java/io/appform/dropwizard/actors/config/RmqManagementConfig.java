@@ -53,11 +53,4 @@ public class RmqManagementConfig {
      */
     @Default
     private boolean secure = false;
-
-    /**
-     * When the Management API is unreachable or returns an error, fail startup (strict) instead of
-     * proceeding. Defaults to strict.
-     */
-    @Default
-    private boolean failOnManagementUnavailable = true;
 }
