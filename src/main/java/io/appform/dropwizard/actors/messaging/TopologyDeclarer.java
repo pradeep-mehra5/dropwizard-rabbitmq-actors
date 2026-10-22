@@ -44,6 +44,14 @@ class TopologyDeclarer {
         this.bindingGuard = bindingGuard;
     }
 
+    /**
+     * Declares one exchange and everything bound to it, on a dedicated channel that is closed afterwards. Called once
+     * per configured exchange when messaging starts; the config is expected to be validated already.
+     *
+     * @param names      logical and broker names for the exchange
+     * @param spec       the exchange's config
+     * @param connection connection to declare on (the exchange's producer connection)
+     */
     void declare(final ExchangeNames names, final ExchangeSpec spec, final RMQConnection connection)
             throws Exception {
         final Channel channel = connection.newChannel();
@@ -53,6 +61,7 @@ class TopologyDeclarer {
                 declareQueue(channel, connection, names, spec, entry.getKey(), entry.getValue());
             }
         } finally {
+            // A failed declaration has already closed the channel; closing it again would hide the real error.
             if (channel.isOpen()) {
                 channel.close();
             }
@@ -61,11 +70,18 @@ class TopologyDeclarer {
 
     private void declareExchange(final Channel channel, final ExchangeNames names, final ExchangeSpec spec)
             throws IOException {
+        // Exchange arguments are immutable: changing any of them on an existing exchange fails the redeclare (406).
         final Map<String, Object> exchangeArgs = new HashMap<>();
+
+        // 1. Optional capture of unroutable events. The alternate exchange must exist before the exchange that
+        //    points to it.
         if (spec.isCaptureUnroutable()) {
             declareUnrouted(channel, names);
             exchangeArgs.put("alternate-exchange", names.unroutedExchange());
         }
+
+        // 2. The exchange itself, durable and never auto-deleted. A delayed exchange is an x-delayed-message exchange
+        //    that holds each message for its x-delay, then routes it like the configured type (x-delayed-type).
         if (spec.isDelayed()) {
             exchangeArgs.put(DELAYED_TYPE_ARG, spec.getType().getAmqpType());
             channel.exchangeDeclare(names.broker(), DELAYED_EXCHANGE_TYPE, true, false, exchangeArgs);
@@ -74,9 +90,16 @@ class TopologyDeclarer {
         }
         log.info("Declared exchange {} (broker {}) type={} delayed={}", names.logical(), names.broker(),
                 spec.getType(), spec.isDelayed());
+
+        // 3. The sideline (dead-letter) exchange shared by the exchange's queues. Always DIRECT, whatever the exchange
+        //    type: each queue dead-letters with its own name as routing key, reaching only its own sideline queue.
         channel.exchangeDeclare(names.sideline(), ExchangeType.DIRECT.getAmqpType(), true);
     }
 
+    /**
+     * Declares one queue: its sideline queue, the queue itself with its bindings (drift-guarded), and its retry
+     * exchange if enabled.
+     */
     private void declareQueue(final Channel channel,
                               final RMQConnection connection,
                               final ExchangeNames names,
@@ -86,31 +109,55 @@ class TopologyDeclarer {
         final String brokerQueue = MessagingNames.queue(prefix, queue);
         final Map<String, Object> baseArgs = queueArguments(connection, names, queueSpec);
 
-        final String sidelineQueue = MessagingNames.sidelineQueue(brokerQueue);
-        channel.queueDeclare(sidelineQueue, true, false, false, baseArgs);
-        channel.queueBind(sidelineQueue, names.sideline(), brokerQueue);
+        // 1. Sideline queue first, so rejected messages always have somewhere to go.
+        declareSidelineQueue(channel, names, brokerQueue, baseArgs);
 
-        // The dead-letter routing key is pinned to the queue name: the message's own routing key (a topic key, or
-        // empty for fanout) would not match the sideline binding.
+        // 2. The queue itself, dead-lettering to the sideline exchange. The dead-letter routing key is pinned to the
+        //    queue name: the message's own routing key (a topic key, or empty for fanout) would not match the
+        //    sideline binding.
         final Map<String, Object> mainArgs = new HashMap<>(baseArgs);
         mainArgs.put("x-dead-letter-exchange", names.sideline());
         mainArgs.put("x-dead-letter-routing-key", brokerQueue);
 
+        // 3. Bindings, through the drift guard. FANOUT ignores routing keys, so it binds with "".
         final List<String> bindingKeys = spec.getType().usesRoutingKey() ? queueSpec.getBindingKeys() : List.of("");
         final String retryExchange = MessagingNames.retryExchange(brokerQueue);
-        final Set<String> otherSources = queueSpec.isRetryLaterEnabled() ? Set.of(retryExchange) : Set.of();
-
-        bindingGuard.ensureBindings(brokerQueue, names.broker(), bindingKeys, otherSources,
+        final Set<String> allowedOtherExchanges = queueSpec.isRetryLaterEnabled() ? Set.of(retryExchange) : Set.of();
+        bindingGuard.ensureBindings(brokerQueue, names.broker(), bindingKeys, allowedOtherExchanges,
                 () -> channel.queueDeclare(brokerQueue, true, false, false, mainArgs),
                 key -> channel.queueBind(brokerQueue, names.broker(), key));
         log.info("Declared queue {} on exchange {} with binding keys {}", brokerQueue, names.broker(), bindingKeys);
 
+        // 4. Private retry exchange for MessageContext.retryLater.
         if (queueSpec.isRetryLaterEnabled()) {
-            channel.exchangeDeclare(retryExchange, DELAYED_EXCHANGE_TYPE, true, false,
-                    Map.of(DELAYED_TYPE_ARG, ExchangeType.DIRECT.getAmqpType()));
-            channel.queueBind(brokerQueue, retryExchange, brokerQueue);
-            log.info("Declared retry exchange {} for queue {}", retryExchange, brokerQueue);
+            declareRetryExchange(channel, brokerQueue, retryExchange);
         }
+    }
+
+    /**
+     * Declares {@code <queue>_SIDELINE} with the same arguments as the queue (no dead-lettering of its own), bound to
+     * the exchange's sideline exchange by the queue name.
+     */
+    private static void declareSidelineQueue(final Channel channel,
+                                             final ExchangeNames names,
+                                             final String brokerQueue,
+                                             final Map<String, Object> baseArgs) throws IOException {
+        final String sidelineQueue = MessagingNames.sidelineQueue(brokerQueue);
+        channel.queueDeclare(sidelineQueue, true, false, false, baseArgs);
+        channel.queueBind(sidelineQueue, names.sideline(), brokerQueue);
+    }
+
+    /**
+     * Declares the queue's private delayed exchange (routing DIRECT) and binds only this queue to it, by its name, so a
+     * retry never reaches the exchange's other queues.
+     */
+    private static void declareRetryExchange(final Channel channel,
+                                             final String brokerQueue,
+                                             final String retryExchange) throws IOException {
+        channel.exchangeDeclare(retryExchange, DELAYED_EXCHANGE_TYPE, true, false,
+                Map.of(DELAYED_TYPE_ARG, ExchangeType.DIRECT.getAmqpType()));
+        channel.queueBind(brokerQueue, retryExchange, brokerQueue);
+        log.info("Declared retry exchange {} for queue {}", retryExchange, brokerQueue);
     }
 
     /**
@@ -128,6 +175,13 @@ class TopologyDeclarer {
         return args;
     }
 
+    /**
+     * Declares the alternate exchange (FANOUT, so every unroutable message is caught whatever its routing key) and its
+     * single queue.
+     *
+     * <p>The unrouted queue is declared without arguments, so it has no auto-delete TTL: unlike the exchange's queues,
+     * it is not removed when idle (e.g. in feature environments) and has to be deleted manually.
+     */
     private void declareUnrouted(final Channel channel, final ExchangeNames names) throws IOException {
         channel.exchangeDeclare(names.unroutedExchange(), ExchangeType.FANOUT.getAmqpType(), true);
         channel.queueDeclare(names.unroutedQueue(), true, false, false, Map.of());

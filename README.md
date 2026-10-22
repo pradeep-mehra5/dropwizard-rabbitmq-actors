@@ -141,6 +141,19 @@ make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnk
   can't be changed on an existing queue/exchange (the broker rejects the redeclare with `406 PRECONDITION_FAILED`).
 * Removing a queue from the config does not delete it on the broker; it stays bound and keeps collecting events.
   Delete or unbind it manually.
+* The `<prefix>.<exchange>_UNROUTED` queue has no auto-delete TTL, even when the exchange's queues set `ttlConfig`.
+  It is not removed when idle (e.g. in feature environments); delete it manually.
+
+### Not supported (yet)
+These actor features have no messaging equivalent; use an actor if you need them.
+* **Sharding** (`shardCount`): a messaging queue is a single broker queue, scaled with `concurrency`, so ordering is
+  not guaranteed across consumers.
+* **Sideline processor** (`sidelineProcessorConfig`): rejected events stay in `<queue>_SIDELINE` until moved back
+  manually; nothing reprocesses them automatically.
+* **TTL-based delay** (`DelayType.TTL`): delays need the delayed-message plugin (`delayed: true`).
+* **Per-message priority** and priority queues.
+* **Publishing with both a delay and an expiry** (actors' `publishWithDelayAndExpiry`).
+* **Publishing to an exchange without consuming from it** in the same service.
 
 ### Requirements
 `delayed` and `retryLaterEnabled` need the `rabbitmq_delayed_message_exchange` plugin. The drift checks need the
