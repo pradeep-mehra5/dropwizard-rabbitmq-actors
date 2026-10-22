@@ -87,7 +87,8 @@ class QueueRetryPublisher {
                 Preconditions.checkState(started, "Retry publisher for queue '%s' is not started", brokerQueue);
                 if (channel == null || !channel.isOpen()) {
                     ChannelRecovery.failIfAwaitingConnectionRecovery(channel, "queue '" + brokerQueue + "'");
-                    log.warn("Retry channel for queue {} is closed; reopening", brokerQueue);
+                    log.warn("Retry channel for queue {} is closed ({}); reopening", brokerQueue,
+                            ChannelRecovery.describeCloseReason(channel));
                     openChannel();
                 }
                 channel.basicPublish(retryExchange, brokerQueue, properties, body);

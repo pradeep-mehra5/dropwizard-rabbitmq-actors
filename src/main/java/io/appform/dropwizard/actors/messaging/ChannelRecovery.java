@@ -35,4 +35,15 @@ class ChannelRecovery {
                     reason);
         }
     }
+
+    /**
+     * Describes why {@code channel} was closed, for logging.
+     */
+    String describeCloseReason(final Channel channel) {
+        if (Objects.isNull(channel)) {
+            return "no channel";
+        }
+        final ShutdownSignalException reason = channel.getCloseReason();
+        return Objects.isNull(reason) ? "unknown reason" : reason.getMessage();
+    }
 }

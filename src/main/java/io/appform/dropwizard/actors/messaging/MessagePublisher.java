@@ -193,7 +193,8 @@ public class MessagePublisher<M> {
                 // restores this same channel, so fail fast until it does (see ChannelRecovery).
                 if (channel == null || !channel.isOpen()) {
                     ChannelRecovery.failIfAwaitingConnectionRecovery(channel, "exchange '" + names.logical() + "'");
-                    log.warn("Publish channel for exchange {} is closed; reopening", names.logical());
+                    log.warn("Publish channel for exchange {} is closed ({}); reopening", names.logical(),
+                            ChannelRecovery.describeCloseReason(channel));
                     openChannel();
                 }
 
@@ -263,7 +264,9 @@ public class MessagePublisher<M> {
 
     private void onReturn(final Return returned) {
         lastReturn = returned;
-        log.error("Unroutable message returned by broker: exchange={} routingKey={} replyCode={} replyText={} "
+        // WARN, not ERROR: with publisher confirms the publish also fails with UnroutableMessageException, so the
+        // caller decides how serious it is; without confirms this log line is the only signal.
+        log.warn("Unroutable message returned by broker: exchange={} routingKey={} replyCode={} replyText={} "
                         + "messageId={}", returned.getExchange(), returned.getRoutingKey(), returned.getReplyCode(),
                 returned.getReplyText(), returned.getProperties().getMessageId());
     }
