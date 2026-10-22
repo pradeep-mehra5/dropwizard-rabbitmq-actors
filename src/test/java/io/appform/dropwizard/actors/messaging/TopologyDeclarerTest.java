@@ -1,6 +1,7 @@
 package io.appform.dropwizard.actors.messaging;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
@@ -54,5 +55,29 @@ class TopologyDeclarerTest {
 
         declarer.close();
         verify(channel).close(); // not closed a second time
+    }
+
+    @Test
+    void driftRejectionDeclaresNothingForTheQueue() throws Exception {
+        final Channel channel = mock(Channel.class);
+        when(channel.isOpen()).thenReturn(true);
+        final RMQConnection connection = mock(RMQConnection.class);
+        when(connection.newChannel()).thenReturn(channel);
+        when(connection.rmqOpts(any())).thenReturn(new java.util.HashMap<>());
+        final BindingGuard guard = mock(BindingGuard.class);
+        doThrow(new IllegalStateException("drift")).when(guard)
+                .ensureBindings(anyString(), anyString(), any(), any(), any(), any());
+        final ExchangeSpec spec = ExchangeSpec.builder()
+                .type(ExchangeType.DIRECT)
+                .queues(new java.util.LinkedHashMap<>(java.util.Map.of("Q",
+                        io.appform.dropwizard.actors.messaging.config.QueueSpec.builder()
+                                .bindingKeys(java.util.List.of("k")).build())))
+                .build();
+        final TopologyDeclarer declarer = new TopologyDeclarer("p", guard);
+
+        assertThrows(IllegalStateException.class, () -> declarer.declare(NAMES, spec, connection));
+        // The library never unbinds, so the sideline queue must not be declared or bound before the guard passes.
+        verify(channel, never()).queueDeclare(anyString(), anyBoolean(), anyBoolean(), anyBoolean(), any());
+        verify(channel, never()).queueBind(anyString(), anyString(), anyString());
     }
 }

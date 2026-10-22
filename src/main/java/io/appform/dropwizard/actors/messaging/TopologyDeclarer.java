@@ -17,7 +17,8 @@ import lombok.extern.slf4j.Slf4j;
  * <ol>
  *   <li>the exchange (optionally {@code x-delayed-message});</li>
  *   <li>the shared sideline (dead-letter) exchange (DIRECT);</li>
- *   <li>per queue: sideline queue, main queue (dead-lettering to its sideline queue), bindings (drift-guarded) and the
+ *   <li>per queue: main queue (dead-lettering to its sideline queue) with its bindings (drift-guarded, checked before
+ *       anything else is declared for the queue), sideline queue and the
  *       private retry exchange (if {@code retryLaterEnabled}).</li>
  * </ol>
  * This replaces, for messaging, what {@code UnmanagedPublisher.start()} does for a single actor. Actor topology is not
@@ -109,8 +110,8 @@ class TopologyDeclarer {
     }
 
     /**
-     * Declares one queue: its sideline queue, the queue itself with its bindings (drift-guarded), and its retry
-     * exchange if enabled.
+     * Declares one queue: the queue itself with its bindings (drift-guarded), its sideline queue, and its retry exchange
+     * if enabled.
      */
     private void declareQueue(final Channel channel,
                               final RMQConnection connection,
@@ -121,17 +122,14 @@ class TopologyDeclarer {
         final String brokerQueue = MessagingNames.queue(prefix, queue);
         final Map<String, Object> baseArgs = queueArguments(connection, names, queueSpec);
 
-        // 1. Sideline queue first, so rejected messages always have somewhere to go.
-        declareSidelineQueue(channel, names, brokerQueue, baseArgs);
-
-        // 2. The queue itself, dead-lettering to the sideline exchange. The dead-letter routing key is pinned to the
-        //    queue name: the message's own routing key (a topic key, or empty for fanout) would not match the
-        //    sideline binding.
+        // 1. The queue itself, dead-lettering to the sideline exchange, and its bindings through the drift guard. This
+        //    runs first: if the guard rejects the queue (changed keys, moved to another exchange), startup fails before
+        //    anything else is declared for it, since the library never removes a binding it has added. The dead-letter
+        //    routing key is pinned to the queue name: the message's own routing key (a topic key, or empty for fanout)
+        //    would not match the sideline binding. FANOUT ignores routing keys, so it binds with "".
         final Map<String, Object> mainArgs = new HashMap<>(baseArgs);
         mainArgs.put("x-dead-letter-exchange", names.sideline());
         mainArgs.put("x-dead-letter-routing-key", brokerQueue);
-
-        // 3. Bindings, through the drift guard. FANOUT ignores routing keys, so it binds with "".
         final List<String> bindingKeys = spec.getType().usesRoutingKey() ? queueSpec.getBindingKeys() : List.of("");
         final String retryExchange = MessagingNames.retryExchange(brokerQueue);
         final Set<String> allowedOtherExchanges = queueSpec.isRetryLaterEnabled() ? Set.of(retryExchange) : Set.of();
@@ -140,7 +138,10 @@ class TopologyDeclarer {
                 key -> channel.queueBind(brokerQueue, names.broker(), key));
         log.info("Declared queue {} on exchange {} with binding keys {}", brokerQueue, names.broker(), bindingKeys);
 
-        // 4. Private retry exchange for MessageContext.retryLater.
+        // 2. Sideline queue. Declared before any consumer starts, so a rejected message always has somewhere to go.
+        declareSidelineQueue(channel, names, brokerQueue, baseArgs);
+
+        // 3. Private retry exchange for MessageContext.retryLater.
         if (queueSpec.isRetryLaterEnabled()) {
             declareRetryExchange(channel, brokerQueue, retryExchange);
         }
