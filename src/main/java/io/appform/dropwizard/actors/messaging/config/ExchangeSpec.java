@@ -41,9 +41,11 @@ public class ExchangeSpec {
 
     /**
      * Wait for the broker's publisher confirm on every publish (default). A publish then fails if the broker did not
-     * accept it, or with {@code UnroutableMessageException} if no binding matched (non-delayed exchanges). Costs a
-     * broker round trip per publish; disable for fire-and-forget throughput, at the price of unroutable messages being
-     * only logged.
+     * accept it, or with {@code UnroutableMessageException} if no binding matched (non-delayed exchanges).
+     *
+     * <p>Reduces publish throughput: each publisher waits for the broker's confirm before its next publish. Disable for
+     * fire-and-forget throughput, at the price of unroutable messages being only logged, or use several publishers for
+     * the exchange.
      */
     @Builder.Default
     private boolean publisherConfirms = true;

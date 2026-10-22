@@ -117,8 +117,9 @@ make message classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreU
 * **Topology first.** All exchanges, queues and bindings are declared before any publisher or consumer starts.
 * **No silent loss on normal exchanges.** Publishes use `mandatory`. With publisher confirms (the default), a message
   no binding matches fails with `UnroutableMessageException`, and a publish the broker did not accept fails too.
-  * Confirms cost a broker round trip per publish, and publishes on one exchange are serialized. Set
-    `publisherConfirms: false` for fire-and-forget throughput; unroutable messages are then only logged and dropped.
+  * Confirms cost a broker round trip per publish, and publishes on one publisher are serialized: see
+    [Publish throughput](#publish-throughput). Set `publisherConfirms: false` for fire-and-forget throughput;
+    unroutable messages are then only logged and dropped.
   * A confirm timeout can leave the caller unsure whether the broker got the message, so retries can duplicate it.
     Consumers should be idempotent.
   * **Risk with delayed exchanges:** the delayed-message plugin does not support `mandatory`, so a message that no
@@ -134,6 +135,25 @@ make message classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreU
   `ttlConfig` deletes an unused queue (`x-expires`); it is not a message TTL. Priority queues are not supported.
   `haMode`/`haParams` are not supported either: as queue arguments they don't enable mirroring. For replicated queues
   use `queueType: QUORUM`, or a mirroring policy matching the messaging queue names.
+
+### Publish throughput
+Publisher confirms reduce publish throughput: each publisher has one publish in flight at a time and waits for the
+broker's confirm before the next one. To publish faster:
+* **Turn confirms off** for that exchange (`publisherConfirms: false`), accepting that unroutable messages are only
+  logged.
+* **Use several publishers** for the exchange: each `publisher(...)` call has its own channel, so their publishes
+  overlap. Register them in `Application.run` and spread publishes across them:
+
+  ```java
+  final List<MessagePublisher<OrderMessage>> publishers = new ArrayList<>();
+  for (int i = 0; i < 4; i++) {
+      publishers.add(messaging.publisher("order_events", OrderMessage::routingKey));
+  }
+  // Same key -> same publisher, so messages for one order stay in order.
+  publishers.get(Math.floorMod(message.getOrderId().hashCode(), publishers.size())).publish(message);
+  ```
+
+  Messages sent through different publishers can arrive out of order; pick the publisher by a key when order matters.
 
 ### Changing topology
 * Adding queues or exchanges is always safe.
