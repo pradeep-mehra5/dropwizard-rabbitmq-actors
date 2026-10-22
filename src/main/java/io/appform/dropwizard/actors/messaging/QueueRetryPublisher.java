@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.ShutdownSignalException;
 import io.appform.dropwizard.actors.common.Constants;
 import io.appform.dropwizard.actors.common.RabbitmqActorException;
 import io.appform.dropwizard.actors.connectivity.RMQConnection;
@@ -97,7 +98,9 @@ class QueueRetryPublisher {
             Thread.currentThread().interrupt();
             throw RabbitmqActorException.propagate(String.format(
                     "Interrupted while scheduling retry for queue '%s'", brokerQueue), e);
-        } catch (IOException | TimeoutException e) {
+        } catch (IOException | TimeoutException | ShutdownSignalException e) {
+            // ShutdownSignalException is unchecked: the broker closed the channel or connection. The channel is
+            // reopened on the next retry.
             throw RabbitmqActorException.propagate(String.format(
                     "Error scheduling retry for queue '%s'", brokerQueue), e);
         }

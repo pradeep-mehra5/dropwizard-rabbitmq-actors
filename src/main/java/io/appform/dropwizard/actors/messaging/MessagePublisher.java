@@ -5,6 +5,7 @@ import com.google.common.base.Preconditions;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Return;
+import com.rabbitmq.client.ShutdownSignalException;
 import io.appform.dropwizard.actors.common.Constants;
 import io.appform.dropwizard.actors.common.RabbitmqActorException;
 import io.appform.dropwizard.actors.connectivity.RMQConnection;
@@ -221,6 +222,11 @@ public class MessagePublisher<M> {
         } catch (IOException e) {
             throw RabbitmqActorException.propagate(String.format(
                     "Error publishing to exchange '%s'", names.logical()), e);
+        } catch (ShutdownSignalException e) {
+            // Unchecked: the broker closed the channel or connection (e.g. 404 for a missing exchange). The channel is
+            // reopened on the next publish.
+            throw RabbitmqActorException.propagate(String.format(
+                    "Channel closed while publishing to exchange '%s': %s", names.logical(), e.getMessage()), e);
         }
     }
 
