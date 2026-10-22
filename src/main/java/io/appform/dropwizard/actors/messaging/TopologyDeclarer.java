@@ -23,9 +23,10 @@ import lombok.extern.slf4j.Slf4j;
  * This replaces, for messaging, what {@code UnmanagedPublisher.start()} does for a single actor. Actor topology is not
  * touched.
  *
- * <p>Declarations run on a dedicated channel that is closed afterwards: the broker closes a channel on any declaration
- * error (e.g. {@code 406 PRECONDITION_FAILED}), and that must not take down the connection's shared channel used by
- * actors.
+ * <p>Declarations run on a dedicated channel per exchange: the broker closes a channel on any declaration error (e.g.
+ * {@code 406 PRECONDITION_FAILED}), and that must not take down the connection's shared channel used by actors. The
+ * channel stays open until {@link #close()}, because the client's automatic topology recovery redeclares on the
+ * channel each entity was originally declared on.
  */
 @Slf4j
 class TopologyDeclarer {
@@ -37,6 +38,7 @@ class TopologyDeclarer {
 
     private final String prefix;
     private final BindingGuard bindingGuard;
+    private final List<Channel> declarationChannels = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     TopologyDeclarer(final String prefix, final BindingGuard bindingGuard) {
         this.prefix = prefix;
@@ -44,7 +46,7 @@ class TopologyDeclarer {
     }
 
     /**
-     * Declares one exchange and everything bound to it, on a dedicated channel that is closed afterwards. Called once
+     * Declares one exchange and everything bound to it, on a dedicated channel kept open for recovery. Called once
      * per configured exchange when messaging starts; the config is expected to be validated already.
      *
      * @param names      logical and broker names for the exchange
@@ -59,11 +61,31 @@ class TopologyDeclarer {
             for (final Map.Entry<String, QueueSpec> entry : spec.getQueues().entrySet()) {
                 declareQueue(channel, connection, names, spec, entry.getKey(), entry.getValue());
             }
-        } finally {
+        } catch (Exception e) {
             // A failed declaration has already closed the channel; closing it again would hide the real error.
+            closeQuietly(channel);
+            throw e;
+        }
+        // Kept open on purpose: the client's automatic recovery redeclares each recorded exchange, queue and binding
+        // on the channel it was declared on. Closing it would make every redeclare fail after a reconnect.
+        declarationChannels.add(channel);
+    }
+
+    /**
+     * Closes the channels kept open for topology recovery. Called when messaging stops.
+     */
+    synchronized void close() {
+        declarationChannels.forEach(TopologyDeclarer::closeQuietly);
+        declarationChannels.clear();
+    }
+
+    private static void closeQuietly(final Channel channel) {
+        try {
             if (channel.isOpen()) {
                 channel.close();
             }
+        } catch (Exception e) {
+            log.warn("Error closing topology declaration channel", e);
         }
     }
 

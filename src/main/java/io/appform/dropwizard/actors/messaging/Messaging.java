@@ -185,6 +185,7 @@ public class Messaging implements Managed {
             log.error("Messaging failed to start; stopping what was started", e);
             state = State.STOPPED;
             stopAll(startedConsumers, startedPublishers);
+            topologyDeclarer.close();
             throw e;
         }
         state = State.STARTED;
@@ -201,7 +202,11 @@ public class Messaging implements Managed {
             return;
         }
         state = State.STOPPED;
-        stopAll(consumers.values(), publishers);
+        try {
+            stopAll(consumers.values(), publishers);
+        } finally {
+            topologyDeclarer.close();
+        }
         log.info("Messaging stopped: exchanges={}", config.getExchanges().keySet());
     }
 
