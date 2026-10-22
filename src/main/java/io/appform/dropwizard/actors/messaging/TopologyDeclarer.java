@@ -73,7 +73,7 @@ class TopologyDeclarer {
         // Exchange arguments are immutable: changing any of them on an existing exchange fails the redeclare (406).
         final Map<String, Object> exchangeArgs = new HashMap<>();
 
-        // 1. Optional capture of unroutable events. The alternate exchange must exist before the exchange that
+        // 1. Optional capture of unroutable messages. The alternate exchange must exist before the exchange that
         //    points to it.
         if (spec.isCaptureUnroutable()) {
             declareUnrouted(channel, names);

@@ -20,7 +20,7 @@ class MessagingNames {
      * @param logical          config key, used in code, logs and metrics
      * @param broker           exchange name on the broker ({@code <namespace>.<logical>})
      * @param sideline         dead-letter exchange shared by the exchange's queues (DIRECT, routed by queue name)
-     * @param unroutedExchange alternate exchange receiving unroutable events (fanout)
+     * @param unroutedExchange alternate exchange receiving unroutable messages (fanout)
      * @param unroutedQueue    queue bound to {@code unroutedExchange} ({@code <namespace>.<prefix>.<logical>_UNROUTED})
      */
     record ExchangeNames(String logical, String broker, String sideline, String unroutedExchange,

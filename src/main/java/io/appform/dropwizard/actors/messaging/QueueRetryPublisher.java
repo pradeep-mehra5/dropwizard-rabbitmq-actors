@@ -62,7 +62,7 @@ class QueueRetryPublisher {
         }
     }
 
-    void publish(final Object event, final Map<String, Object> originalHeaders, final Duration delay) {
+    void publish(final Object message, final Map<String, Object> originalHeaders, final Duration delay) {
         Preconditions.checkArgument(delay != null && !delay.isNegative(), "delay must not be negative");
         final Map<String, Object> headers = new HashMap<>();
         if (originalHeaders != null) {
@@ -81,7 +81,7 @@ class QueueRetryPublisher {
                 .headers(headers)
                 .build();
         try {
-            final byte[] body = mapper.writeValueAsBytes(event);
+            final byte[] body = mapper.writeValueAsBytes(message);
             synchronized (lock) {
                 Preconditions.checkState(started, "Retry publisher for queue '%s' is not started", brokerQueue);
                 if (channel == null || !channel.isOpen()) {

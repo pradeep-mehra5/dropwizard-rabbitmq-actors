@@ -24,7 +24,7 @@ import java.util.concurrent.TimeoutException;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Publishes events to an exchange. Which queues receive an event is decided by the exchange type and the queues'
+ * Publishes messages to an exchange. Which queues receive a message is decided by the exchange type and the queues'
  * bindings, never by the publisher.
  *
  * <p>Delivery guarantees (non-delayed exchanges):
@@ -34,14 +34,14 @@ import lombok.extern.slf4j.Slf4j;
  *       (unroutable) message fails the publish with {@link UnroutableMessageException};</li>
  *   <li>without confirms, returned messages are only logged (the publish has already returned).</li>
  * </ul>
- * The delayed-message plugin does not support {@code mandatory}, so on a delayed exchange an unroutable event is
+ * The delayed-message plugin does not support {@code mandatory}, so on a delayed exchange an unroutable message is
  * not detected: it is dropped silently unless {@code captureUnroutable} is set.
  *
  * <p>Thread-safe: publishes are serialized on one channel. If the channel gets closed (e.g. a confirm timed out or the
  * broker rejected an operation), it is reopened on the next publish.
  */
 @Slf4j
-public class EventPublisher<E> {
+public class MessagePublisher<M> {
 
     /**
      * AMQP limits a routing key (short string) to 255 bytes.
@@ -50,7 +50,7 @@ public class EventPublisher<E> {
 
     private final ExchangeNames names;
     private final ExchangeSpec spec;
-    private final RoutingKeyResolver<E> routingKeyResolver;
+    private final RoutingKeyResolver<M> routingKeyResolver;
     private final RMQConnection connection;
     private final ObjectMapper mapper;
     private final RMQObserver observer;
@@ -60,9 +60,9 @@ public class EventPublisher<E> {
     private boolean started;
     private volatile Return lastReturn;
 
-    EventPublisher(final ExchangeNames names,
+    MessagePublisher(final ExchangeNames names,
                    final ExchangeSpec spec,
-                   final RoutingKeyResolver<E> routingKeyResolver,
+                   final RoutingKeyResolver<M> routingKeyResolver,
                    final RMQConnection connection,
                    final ObjectMapper mapper) {
         Preconditions.checkArgument(!spec.getType().usesRoutingKey() || routingKeyResolver != null,
@@ -100,63 +100,104 @@ public class EventPublisher<E> {
         }
     }
 
-    public void publish(final E event) {
-        publish(event, Map.of());
-    }
-
-    public void publish(final E event, final Map<String, Object> headers) {
-        send(event, headers, null, null);
+    /**
+     * Publishes {@code message} to the exchange. The routing key comes from the {@link RoutingKeyResolver} (empty for
+     * FANOUT).
+     *
+     * @throws UnroutableMessageException if no binding matched (publisher confirms on, no {@code captureUnroutable})
+     * @throws IllegalArgumentException   if the routing key is blank or longer than 255 bytes
+     * @throws IllegalStateException      if the publisher is not started
+     * @throws io.appform.dropwizard.actors.common.RabbitmqActorException if serialization or publishing fails, or the
+     *                                    confirm times out
+     */
+    public void publish(final M message) {
+        publish(message, Map.of());
     }
 
     /**
-     * Publishes with a delay. Requires the exchange to be configured with {@code delayed: true}.
+     * Same as {@link #publish(Object)}, with extra message headers (e.g. a feature-environment header). Headers set by
+     * the library ({@code x-published-at}, {@code x-delay}, {@code x-expire-at}) take precedence. {@code null} means no
+     * headers.
      */
-    public void publishWithDelay(final E event, final Duration delay) {
+    public void publish(final M message, final Map<String, Object> headers) {
+        send(message, headers, null, null);
+    }
+
+    /**
+     * Publishes with a delay. Requires the exchange to be configured with {@code delayed: true}. Otherwise behaves like
+     * {@link #publish(Object)}, except that unroutable messages are not detected (see the class javadoc).
+     */
+    public void publishWithDelay(final M message, final Duration delay) {
+        publishWithDelay(message, delay, Map.of());
+    }
+
+    /**
+     * Same as {@link #publishWithDelay(Object, Duration)}, with extra message headers ({@code null} means none).
+     */
+    public void publishWithDelay(final M message, final Duration delay, final Map<String, Object> headers) {
         Preconditions.checkState(spec.isDelayed(),
                 "Exchange '%s' is not delayed; set delayed: true to publish with a delay", names.logical());
         Preconditions.checkArgument(delay != null && !delay.isNegative(), "delay must not be negative");
-        send(event, Map.of(), delay, null);
+        send(message, headers, delay, null);
     }
 
     /**
-     * Publishes an event that consumers treat as expired after {@code expiry}: it is handed to
-     * {@code QueueHandler.handleExpired} instead of {@code handle}.
+     * Publishes a message that consumers treat as expired after {@code expiry}: it is handed to
+     * {@code QueueHandler.handleExpired} instead of {@code handle}. Otherwise behaves like {@link #publish(Object)}.
      */
-    public void publishWithExpiry(final E event, final Duration expiry) {
-        Preconditions.checkArgument(expiry != null && !expiry.isNegative() && !expiry.isZero(),
-                "expiry must be positive");
-        send(event, Map.of(), null, expiry);
+    public void publishWithExpiry(final M message, final Duration expiry) {
+        publishWithExpiry(message, expiry, Map.of());
     }
 
-    private void send(final E event, final Map<String, Object> headers, final Duration delay, final Duration expiry) {
-        Objects.requireNonNull(event, "event");
-        final String routingKey = routingKey(event);
-        final AMQP.BasicProperties properties = properties(headers, delay, expiry);
+    /**
+     * Same as {@link #publishWithExpiry(Object, Duration)}, with extra message headers ({@code null} means none).
+     */
+    public void publishWithExpiry(final M message, final Duration expiry, final Map<String, Object> headers) {
+        Preconditions.checkArgument(expiry != null && !expiry.isNegative() && !expiry.isZero(),
+                "expiry must be positive");
+        send(message, headers, null, expiry);
+    }
+
+    private void send(final M message, final Map<String, Object> headers, final Duration delay, final Duration expiry) {
+        Objects.requireNonNull(message, "message");
+        final String routingKey = routingKey(message);
         final PublishObserverContext context = PublishObserverContext.builder()
                 .queueName(names.broker())
-                .messageProperties(properties)
+                .messageProperties(properties(headers, delay, expiry))
                 .build();
+        // Observers (metrics, tracing...) may replace the properties. The headers the library relies on are added
+        // after them, like UnmanagedPublisher does, so an observer can't drop them.
         observer.executePublish(context, details -> {
-            doSend(event, routingKey, details.getMessageProperties());
+            doSend(message, routingKey, enrich(details.getMessageProperties()));
             return null;
         });
     }
 
-    private void doSend(final E event, final String routingKey, final AMQP.BasicProperties properties) {
+    private void doSend(final M message, final String routingKey, final AMQP.BasicProperties properties) {
         // The delayed-message plugin does not support mandatory: it would return every message.
         final boolean mandatory = !spec.isDelayed();
         try {
-            final byte[] body = mapper.writeValueAsBytes(event);
+            // Serialize outside the lock, so a slow or failing serialization doesn't hold up other publishes.
+            final byte[] body = mapper.writeValueAsBytes(message);
+
+            // The lock is held until the confirm arrives: one channel, one publish in flight at a time. That keeps the
+            // returned-message check below unambiguous, at the cost of serializing publishes on this exchange.
             synchronized (lock) {
                 Preconditions.checkState(started, "Publisher for exchange '%s' is not started", names.logical());
+
+                // A confirm timeout or a broker error closes the channel; reopen it rather than failing every publish
+                // until restart.
                 if (channel == null || !channel.isOpen()) {
                     log.warn("Publish channel for exchange {} is closed; reopening", names.logical());
                     openChannel();
                 }
+
                 lastReturn = null;
                 channel.basicPublish(names.broker(), routingKey, mandatory, properties, body);
+
                 if (spec.isPublisherConfirms()) {
-                    // The broker sends basic.return for an unroutable mandatory message before its confirm.
+                    // The broker sends basic.return for an unroutable mandatory message before its confirm, so once
+                    // the confirm has arrived, onReturn has already run for this message if it was unroutable.
                     channel.waitForConfirmsOrDie(spec.getConfirmTimeoutMs());
                     final Return returned = lastReturn;
                     if (returned != null
@@ -168,7 +209,9 @@ public class EventPublisher<E> {
             }
         } catch (TimeoutException e) {
             throw RabbitmqActorException.propagate(String.format(
-                    "Timed out waiting for publisher confirm on exchange '%s'", names.logical()), e);
+                    "Timed out after %d ms waiting for publisher confirm on exchange '%s'. The message may or may not "
+                            + "have reached the broker; retrying can publish it twice.",
+                    spec.getConfirmTimeoutMs(), names.logical()), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw RabbitmqActorException.propagate(String.format(
@@ -197,11 +240,11 @@ public class EventPublisher<E> {
                 returned.getReplyText(), returned.getProperties().getMessageId());
     }
 
-    private String routingKey(final E event) {
+    private String routingKey(final M message) {
         if (!spec.getType().usesRoutingKey()) {
             return "";
         }
-        final String key = routingKeyResolver.resolve(event);
+        final String key = routingKeyResolver.resolve(message);
         Preconditions.checkArgument(key != null && !key.isBlank(),
                 "RoutingKeyResolver returned a blank routing key for exchange '%s'", names.logical());
         Preconditions.checkArgument(key.getBytes(StandardCharsets.UTF_8).length <= MAX_ROUTING_KEY_BYTES,
@@ -209,22 +252,39 @@ public class EventPublisher<E> {
         return key;
     }
 
+    /**
+     * Properties describing the message, handed to the observers: persistent delivery, the caller's headers, and the
+     * delay/expiry headers.
+     */
     private static AMQP.BasicProperties properties(final Map<String, Object> headers,
                                                    final Duration delay,
                                                    final Duration expiry) {
-        final Map<String, Object> allHeaders = new HashMap<>(headers);
-        final long now = Instant.now().toEpochMilli();
-        allHeaders.put(Constants.MESSAGE_PUBLISHED_TEXT, now);
+        final Map<String, Object> allHeaders = headers == null ? new HashMap<>() : new HashMap<>(headers);
         if (delay != null) {
             allHeaders.put("x-delay", delay.toMillis());
         }
         if (expiry != null) {
-            allHeaders.put(Constants.MESSAGE_EXPIRY_TEXT, now + expiry.toMillis());
+            allHeaders.put(Constants.MESSAGE_EXPIRY_TEXT, Instant.now().toEpochMilli() + expiry.toMillis());
         }
         return new AMQP.BasicProperties.Builder()
                 .deliveryMode(2)
-                .messageId(UUID.randomUUID().toString())
                 .headers(allHeaders)
+                .build();
+    }
+
+    /**
+     * Adds what the library itself relies on to the properties coming out of the observers: {@code x-published-at}
+     * (consumers' delay metrics) and a fresh {@code messageId} (matching a returned message to this publish).
+     */
+    private static AMQP.BasicProperties enrich(final AMQP.BasicProperties properties) {
+        final Map<String, Object> headers = new HashMap<>();
+        if (properties.getHeaders() != null) {
+            headers.putAll(properties.getHeaders());
+        }
+        headers.put(Constants.MESSAGE_PUBLISHED_TEXT, Instant.now().toEpochMilli());
+        return properties.builder()
+                .messageId(UUID.randomUUID().toString())
+                .headers(headers)
                 .build();
     }
 }

@@ -17,18 +17,18 @@ import org.apache.commons.lang3.ClassUtils;
  * Runs a {@link QueueHandler} on one configured queue, on top of the actors' {@link UnmanagedConsumer} (concurrency,
  * prefetch, retry strategy, exception handling, expiry and observers behave exactly as for actors).
  */
-class QueueConsumer<E> {
+class QueueConsumer<M> {
 
     private final String queue;
-    private final UnmanagedConsumer<E> consumer;
+    private final UnmanagedConsumer<M> consumer;
     private final QueueRetryPublisher retryPublisher;
 
     QueueConsumer(final String prefix,
                   final String queue,
                   final ExchangeSpec exchangeSpec,
                   final QueueSpec spec,
-                  final Class<? extends E> eventType,
-                  final QueueHandler<E> handler,
+                  final Class<? extends M> messageType,
+                  final QueueHandler<M> handler,
                   final RMQConnection consumerConnection,
                   final RMQConnection producerConnection,
                   final ObjectMapper mapper,
@@ -50,9 +50,9 @@ class QueueConsumer<E> {
                 mapper,
                 retryStrategyFactory.create(spec.getRetryConfig()),
                 exceptionHandlingFactory.create(spec.getExceptionHandlerConfig()),
-                eventType,
-                (event, metadata) -> handler.handle(event, context(metadata)),
-                (event, metadata) -> handler.handleExpired(event, context(metadata)),
+                messageType,
+                (message, metadata) -> handler.handle(message, context(metadata)),
+                (message, metadata) -> handler.handleExpired(message, context(metadata)),
                 t -> isDropped(t, handler.droppedExceptionTypes()));
     }
 
@@ -83,7 +83,7 @@ class QueueConsumer<E> {
         return false;
     }
 
-    private MessageContext<E> context(final MessageMetadata metadata) {
+    private MessageContext<M> context(final MessageMetadata metadata) {
         return new MessageContext<>() {
             @Override
             public String queue() {
@@ -96,13 +96,13 @@ class QueueConsumer<E> {
             }
 
             @Override
-            public void retryLater(final E event, final Duration delay) {
+            public void retryLater(final M message, final Duration delay) {
                 if (retryPublisher == null) {
                     throw new IllegalStateException(String.format(
                             "retryLater is not enabled for queue '%s'; set retryLaterEnabled: true", queue));
                 }
                 final Map<String, Object> headers = metadata == null ? null : metadata.getHeaders();
-                retryPublisher.publish(event, headers, delay);
+                retryPublisher.publish(message, headers, delay);
             }
         };
     }

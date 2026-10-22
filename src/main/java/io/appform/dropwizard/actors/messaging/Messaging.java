@@ -22,14 +22,14 @@ import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Exchange-centric messaging: application code publishes events to exchanges, and handlers consume from the queues
+ * Exchange-centric messaging: application code publishes messages to exchanges, and handlers consume from the queues
  * bound to those exchanges. Publishers and consumers are separate, so a call site always names the exchange it
- * publishes to, and the configured bindings alone decide which queues receive an event.
+ * publishes to, and the configured bindings alone decide which queues receive a message.
  *
  * <p>Register publishers and handlers before the application starts (e.g. in {@code Application.run}):
  * <pre>
- * EventPublisher&lt;OrderEvent&gt; publisher = messaging.publisher("order_events", OrderEvent::routingKey);
- * messaging.consumer("order_events", "shipping", OrderEvent.class, (event, context) -&gt; ship(event));
+ * MessagePublisher&lt;OrderMessage&gt; publisher = messaging.publisher("order_events", OrderMessage::routingKey);
+ * messaging.consumer("order_events", "shipping", OrderMessage.class, (message, context) -&gt; ship(message));
  * </pre>
  *
  * <p>{@link #start()} then:
@@ -54,7 +54,7 @@ public class Messaging implements Managed {
     private final ExceptionHandlingFactory exceptionHandlingFactory;
     private final TopologyDeclarer topologyDeclarer;
 
-    private final List<EventPublisher<?>> publishers = new ArrayList<>();
+    private final List<MessagePublisher<?>> publishers = new ArrayList<>();
     private final Map<String, QueueConsumer<?>> consumers = new LinkedHashMap<>();
     private volatile boolean started;
 
@@ -85,8 +85,8 @@ public class Messaging implements Managed {
     /**
      * Publisher for a DIRECT or TOPIC exchange.
      */
-    public synchronized <E> EventPublisher<E> publisher(final String exchange,
-                                                        final RoutingKeyResolver<E> routingKeyResolver) {
+    public synchronized <M> MessagePublisher<M> publisher(final String exchange,
+                                                        final RoutingKeyResolver<M> routingKeyResolver) {
         Preconditions.checkNotNull(routingKeyResolver, "routingKeyResolver");
         return register(exchange, routingKeyResolver);
     }
@@ -94,19 +94,19 @@ public class Messaging implements Managed {
     /**
      * Publisher for a FANOUT exchange.
      */
-    public synchronized <E> EventPublisher<E> publisher(final String exchange) {
+    public synchronized <M> MessagePublisher<M> publisher(final String exchange) {
         return register(exchange, null);
     }
 
     /**
      * Registers the handler for a configured queue. Each queue has exactly one handler.
      */
-    public synchronized <E> void consumer(final String exchange,
+    public synchronized <M> void consumer(final String exchange,
                                           final String queue,
-                                          final Class<? extends E> eventType,
-                                          final QueueHandler<E> handler) {
+                                          final Class<? extends M> messageType,
+                                          final QueueHandler<M> handler) {
         checkNotStarted();
-        Preconditions.checkNotNull(eventType, "eventType");
+        Preconditions.checkNotNull(messageType, "messageType");
         Preconditions.checkNotNull(handler, "handler");
         final ExchangeSpec exchangeSpec = exchangeSpec(exchange);
         final QueueSpec queueSpec = exchangeSpec.getQueues().get(queue);
@@ -114,7 +114,7 @@ public class Messaging implements Managed {
                 queue, exchange);
         Preconditions.checkArgument(!consumers.containsKey(queue), "A handler is already registered for queue '%s'",
                 queue);
-        consumers.put(queue, new QueueConsumer<>(config.getPrefix(), queue, exchangeSpec, queueSpec, eventType,
+        consumers.put(queue, new QueueConsumer<>(config.getPrefix(), queue, exchangeSpec, queueSpec, messageType,
                 handler,
                 connectionRegistry.createOrGet(NamingUtils.consumerConnectionName(queueSpec.getConsumer())),
                 producerConnection(exchangeSpec), mapper, retryStrategyFactory, exceptionHandlingFactory));
@@ -128,16 +128,16 @@ public class Messaging implements Managed {
                 .filter(queue -> !consumers.containsKey(queue))
                 .collect(Collectors.toList());
         Preconditions.checkState(unhandled.isEmpty(),
-                "No handler registered for configured queue(s) %s; events routed to them would never be consumed",
+                "No handler registered for configured queue(s) %s; messages routed to them would never be consumed",
                 unhandled);
 
-        final List<EventPublisher<?>> startedPublishers = new ArrayList<>();
+        final List<MessagePublisher<?>> startedPublishers = new ArrayList<>();
         final List<QueueConsumer<?>> startedConsumers = new ArrayList<>();
         try {
             for (final Map.Entry<String, ExchangeSpec> entry : config.getExchanges().entrySet()) {
                 topologyDeclarer.declare(names(entry.getKey()), entry.getValue(), producerConnection(entry.getValue()));
             }
-            for (final EventPublisher<?> publisher : publishers) {
+            for (final MessagePublisher<?> publisher : publishers) {
                 publisher.start();
                 startedPublishers.add(publisher);
             }
@@ -166,7 +166,7 @@ public class Messaging implements Managed {
      * the first error at the end.
      */
     private static void stopAll(final Collection<? extends QueueConsumer<?>> consumersToStop,
-                                final Collection<? extends EventPublisher<?>> publishersToStop) throws Exception {
+                                final Collection<? extends MessagePublisher<?>> publishersToStop) throws Exception {
         Exception first = null;
         for (final QueueConsumer<?> consumer : consumersToStop) {
             try {
@@ -176,7 +176,7 @@ public class Messaging implements Managed {
                 log.error("Error stopping consumer", e);
             }
         }
-        for (final EventPublisher<?> publisher : publishersToStop) {
+        for (final MessagePublisher<?> publisher : publishersToStop) {
             try {
                 publisher.stop();
             } catch (Exception e) {
@@ -189,10 +189,10 @@ public class Messaging implements Managed {
         }
     }
 
-    private <E> EventPublisher<E> register(final String exchange, final RoutingKeyResolver<E> routingKeyResolver) {
+    private <M> MessagePublisher<M> register(final String exchange, final RoutingKeyResolver<M> routingKeyResolver) {
         checkNotStarted();
         final ExchangeSpec spec = exchangeSpec(exchange);
-        final EventPublisher<E> publisher = new EventPublisher<>(names(exchange), spec, routingKeyResolver,
+        final MessagePublisher<M> publisher = new MessagePublisher<>(names(exchange), spec, routingKeyResolver,
                 producerConnection(spec), mapper);
         publishers.add(publisher);
         return publisher;

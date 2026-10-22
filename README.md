@@ -19,7 +19,7 @@ Apache-2.0
 * **Actors** (`Actor`, `BaseActor`): point-to-point. One DIRECT exchange, one queue, one handler.
   `actor.publish(msg)` always reaches exactly that actor's queue.
 * **Messaging** (`io.appform.dropwizard.actors.messaging`): publish/subscribe over DIRECT, TOPIC and FANOUT
-  exchanges. Code publishes an event *to an exchange* through an `EventPublisher`; the configured queue bindings
+  exchanges. Code publishes a message *to an exchange* through a `MessagePublisher`; the configured queue bindings
   alone decide which queues receive it. Each queue is consumed by a `QueueHandler`, which has no way to publish to
   the exchange it consumes from.
 
@@ -28,12 +28,12 @@ A queue belongs either to an actor or to messaging, never both. Messaging queues
 or queue name in the messaging config.
 
 Set a `prefix` per service (e.g. `myservice.messaging`). With the shared default, two services configuring the same
-queue name would share one broker queue: their consumers would compete for its events, and with different exchanges
+queue name would share one broker queue: their consumers would compete for its messages, and with different exchanges
 the queue would be bound to both.
 
 Exchange names in the config are logical names used in code. On the broker, exchanges and queues are prefixed with
 the namespace (`NAMESPACE_ENV_NAME` / `rmq.actors.namespace`) when one is set, so feature environments sharing a
-broker don't receive each other's events.
+broker don't receive each other's messages.
 
 ### Messaging config
 
@@ -44,7 +44,7 @@ messaging:
     order_events:
       type: TOPIC                      # DIRECT | TOPIC | FANOUT
       delayed: false                   # x-delayed-message exchange, enables publishWithDelay (see the risk below)
-      captureUnroutable: true          # unmatched events go to the <prefix>.<exchange>_UNROUTED queue
+      captureUnroutable: true          # unmatched messages go to the <prefix>.<exchange>_UNROUTED queue
       publisherConfirms: true          # default; publish waits for the broker's confirm
       queues:
         shipping:
@@ -75,30 +75,33 @@ before the application starts:
 ```java
 Messaging messaging = bundle.getMessaging();
 
-EventPublisher<OrderEvent> publisher = messaging.publisher("order_events", OrderEvent::routingKey);
+MessagePublisher<OrderMessage> publisher = messaging.publisher("order_events", OrderMessage::routingKey);
 
-messaging.consumer("order_events", "shipping", OrderEvent.class, (event, context) -> ship(event));
-messaging.consumer("order_events", "audit", OrderEvent.class, (event, context) -> {
-    if (!ready(event)) {
-        context.retryLater(event, Duration.ofMinutes(1));   // this queue only
+messaging.consumer("order_events", "shipping", OrderMessage.class, (message, context) -> ship(message));
+messaging.consumer("order_events", "audit", OrderMessage.class, (message, context) -> {
+    if (!ready(message)) {
+        context.retryLater(message, Duration.ofMinutes(1));   // this queue only
         return true;
     }
-    return audit(event);
+    return audit(message);
 });
 
-publisher.publish(event);
+publisher.publish(message);
 ```
 
 FANOUT exchanges take no routing key: `messaging.publisher("exchange")`.
 
-Each `publisher(...)` call opens its own channel: register one publisher per exchange (or per event type) and reuse it.
+`publish`, `publishWithDelay` and `publishWithExpiry` each have an overload taking extra headers (e.g. a
+feature-environment header); every queue that receives the message gets them.
+
+Each `publisher(...)` call opens its own channel: register one publisher per exchange (or per message type) and reuse it.
 `bundle.getMessaging()` throws if messaging is not configured.
 
 When using `retryLater`, call it as the last step and then `return true`. Calling it and then throwing or returning
 `false` produces duplicates (the handler is retried, or the original is also sidelined). Handlers should be idempotent.
 
-Events are deserialized with Dropwizard's `ObjectMapper`. To let publishers add fields before consumers are updated,
-make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnknown = true)`).
+Messages are deserialized with Dropwizard's `ObjectMapper`. To let publishers add fields before consumers are updated,
+make message classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnknown = true)`).
 
 ### Rules and guarantees
 * **Startup validation.** Startup fails if:
@@ -111,21 +114,21 @@ make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnk
   * a configured queue has no handler;
   * a publisher or handler refers to an unknown exchange or queue.
 * **Topology first.** All exchanges, queues and bindings are declared before any publisher or consumer starts.
-* **No silent loss.** Publishes use `mandatory`. With publisher confirms (the default), an event no binding matches
+* **No silent loss.** Publishes use `mandatory`. With publisher confirms (the default), a message no binding matches
   fails with `UnroutableMessageException`, and a publish the broker did not accept fails too. With
-  `captureUnroutable`, unmatched events are parked in the `<prefix>.<exchange>_UNROUTED` queue instead.
+  `captureUnroutable`, unmatched messages are parked in the `<prefix>.<exchange>_UNROUTED` queue instead.
   * Confirms cost a broker round trip per publish, and publishes on one exchange are serialized. Set
-    `publisherConfirms: false` for fire-and-forget throughput; unroutable events are then only logged.
-  * A confirm timeout can leave the caller unsure whether the broker got the event, so retries can duplicate it.
+    `publisherConfirms: false` for fire-and-forget throughput; unroutable messages are then only logged.
+  * A confirm timeout can leave the caller unsure whether the broker got the message, so retries can duplicate it.
     Consumers should be idempotent.
-  * **Risk with delayed exchanges:** the delayed-message plugin does not support `mandatory`, so an event that no
+  * **Risk with delayed exchanges:** the delayed-message plugin does not support `mandatory`, so a message that no
     binding matches is *not* detected, even with confirms, and is dropped silently. Set `captureUnroutable: true` on
-    delayed exchanges to keep such events.
+    delayed exchanges to keep such messages.
   * A publisher whose channel gets closed (confirm timeout, broker error) reopens it on the next publish.
   * Routing keys are limited to 255 bytes.
 * **Retries stay local.** `retryLater` goes through a private per-queue delayed exchange (`<queue>_RETRY`), so a
   retry never reaches the other queues of the exchange.
-* **Sideline.** Each queue dead-letters rejected events to its own `<queue>_SIDELINE` queue.
+* **Sideline.** Each queue dead-letters rejected messages to its own `<queue>_SIDELINE` queue.
 * **Consumption** runs on the same consumer as actors: concurrency, prefetch, retry config, exception handling,
   expiry (`publishWithExpiry` / `handleExpired`) and metrics behave identically.
 * **Queue arguments** (queue type, lazy mode, quorum group size, auto-delete `ttlConfig`) are built as for actors.
@@ -139,7 +142,7 @@ make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnk
   fails startup; without it, old bindings silently remain. Use a new queue instead.
 * Queue arguments (queue type, lazy mode, TTL) and exchange settings (`type`, `delayed`, `captureUnroutable`)
   can't be changed on an existing queue/exchange (the broker rejects the redeclare with `406 PRECONDITION_FAILED`).
-* Removing a queue from the config does not delete it on the broker; it stays bound and keeps collecting events.
+* Removing a queue from the config does not delete it on the broker; it stays bound and keeps collecting messages.
   Delete or unbind it manually.
 * The `<prefix>.<exchange>_UNROUTED` queue has no auto-delete TTL, even when the exchange's queues set `ttlConfig`.
   It is not removed when idle (e.g. in feature environments); delete it manually.
@@ -148,7 +151,7 @@ make event classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnk
 These actor features have no messaging equivalent; use an actor if you need them.
 * **Sharding** (`shardCount`): a messaging queue is a single broker queue, scaled with `concurrency`, so ordering is
   not guaranteed across consumers.
-* **Sideline processor** (`sidelineProcessorConfig`): rejected events stay in `<queue>_SIDELINE` until moved back
+* **Sideline processor** (`sidelineProcessorConfig`): rejected messages stay in `<queue>_SIDELINE` until moved back
   manually; nothing reprocesses them automatically.
 * **TTL-based delay** (`DelayType.TTL`): delays need the delayed-message plugin (`delayed: true`).
 * **Per-message priority** and priority queues.

@@ -6,7 +6,7 @@ import java.time.Duration;
 /**
  * Per-delivery context handed to a {@link QueueHandler}.
  */
-public interface MessageContext<E> {
+public interface MessageContext<M> {
 
     /**
      * Logical queue name, as configured.
@@ -16,7 +16,7 @@ public interface MessageContext<E> {
     MessageMetadata metadata();
 
     /**
-     * Redelivers {@code event} to this queue only, after {@code delay}. The event goes through the queue's private
+     * Redelivers {@code message} to this queue only, after {@code delay}. The message goes through the queue's private
      * retry exchange, so the other queues bound to the same exchange never see it. Requires
      * {@code retryLaterEnabled: true} on the queue.
      *
@@ -24,5 +24,5 @@ public interface MessageContext<E> {
      * the handler's outcome, so calling it and then throwing (the handler is retried and schedules again) or returning
      * false (the original is sidelined too) produces duplicates. Handlers should be idempotent.
      */
-    void retryLater(E event, Duration delay);
+    void retryLater(M message, Duration delay);
 }
