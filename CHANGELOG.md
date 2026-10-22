@@ -1,6 +1,23 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## 2.0.28-18
+
+- Added exchange-centric messaging (`io.appform.dropwizard.actors.messaging`), opt-in and independent of actors:
+  publish to DIRECT, TOPIC or FANOUT exchanges with `MessagePublisher`; consume each configured queue with a
+  `QueueHandler`. Queue bindings come from config, so which queues receive a message is decided by the broker,
+  not by the publisher.
+- Publisher confirms by default (5 s timeout); a message no binding matches fails the publish with
+  `UnroutableMessageException` (except on delayed exchanges, where the plugin can't report it).
+- Per-queue sideline queue and an optional per-queue delayed retry exchange (`MessageContext.retryLater`), so a
+  retry is redelivered only to the queue that asked for it.
+- The whole config is validated up front and all errors are reported together.
+- With `managementConfig` enabled, startup fails on binding drift (changed binding keys, stale exchange bindings,
+  concurrent creators with a different config) instead of silently keeping stale bindings.
+- Survives connection loss: topology is redeclared by automatic recovery; publishes fail fast until the connection
+  is back, and channels closed by channel-level errors are reopened on the next publish.
+- Actor behaviour and topology are unchanged.
+
 ## 2.0.28-14
 
 - Introduced shard ID calculator interface, with random shard id as the default implementation.
