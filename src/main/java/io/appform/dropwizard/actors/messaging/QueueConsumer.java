@@ -56,15 +56,34 @@ class QueueConsumer<M> {
                 t -> isDropped(t, handler.droppedExceptionTypes()));
     }
 
-    void start() throws Exception {
+    /**
+     * Starts the queue's {@code retryLater} publisher, if enabled (no-op otherwise). Called with the publishers, before
+     * consuming starts.
+     */
+    void startRetryPublisher() throws Exception {
         if (retryPublisher != null) {
             retryPublisher.start();
         }
+    }
+
+    /**
+     * Subscribes to the queue: from here on, the handler receives messages.
+     */
+    void startConsuming() throws Exception {
         consumer.start();
     }
 
-    void stop() throws Exception {
+    /**
+     * Cancels the subscription and waits for in-flight messages, so the handler is no longer called afterwards.
+     */
+    void stopConsuming() {
         consumer.stop();
+    }
+
+    /**
+     * Stops the queue's {@code retryLater} publisher, if enabled (no-op otherwise).
+     */
+    void stopRetryPublisher() throws Exception {
         if (retryPublisher != null) {
             retryPublisher.stop();
         }

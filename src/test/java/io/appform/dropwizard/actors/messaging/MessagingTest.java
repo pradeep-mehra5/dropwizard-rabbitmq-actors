@@ -119,19 +119,67 @@ class MessagingTest {
     }
 
     @Test
-    void startDeclaresTopologyThenPublishersThenConsumers() throws Exception {
+    void startDeclaresTopologyAndStartsPublishersButNotConsumers() throws Exception {
         final Messaging messaging = fullyRegistered();
         messaging.start();
 
         final InOrder order = inOrder(declarer, channel);
         order.verify(declarer, times(2)).declare(any(), any(), eq(connection));
         order.verify(channel, times(2)).confirmSelect();
-        order.verify(channel, times(2)).basicConsume(anyString(), anyBoolean(), anyString(), any(Consumer.class));
+        verify(channel, never()).basicConsume(anyString(), anyBoolean(), anyString(), any(Consumer.class));
         // Messaging never uses the connection's shared channel, which actors use.
         verify(connection, never()).channel();
 
         assertThrows(IllegalStateException.class, () -> messaging.publisher("broadcast"));
         assertThrows(IllegalStateException.class, messaging::start);
+    }
+
+    @Test
+    void startConsumersSubscribesEveryQueueOnce() throws Exception {
+        final Messaging messaging = fullyRegistered();
+        messaging.start();
+        messaging.startConsumers();
+        messaging.startConsumers();
+
+        verify(channel, times(2)).basicConsume(anyString(), anyBoolean(), anyString(), any(Consumer.class));
+    }
+
+    @Test
+    void startConsumersRequiresStart() {
+        final Messaging messaging = fullyRegistered();
+        assertThrows(IllegalStateException.class, messaging::startConsumers);
+    }
+
+    @Test
+    void stopConsumersKeepsPublishersAndPreventsRestart() throws Exception {
+        final Messaging messaging = fullyRegistered();
+        messaging.start();
+        messaging.startConsumers();
+
+        messaging.stopConsumers();
+        messaging.stopConsumers();
+
+        verify(channel, times(2)).basicCancel(any());
+        // Publisher channels are still open: only the consumer channels were closed.
+        verify(channel, times(2)).close();
+        final IllegalStateException e = assertThrows(IllegalStateException.class, messaging::startConsumers);
+        assertTrue(e.getMessage().contains("can't be restarted"), e.getMessage());
+
+        messaging.stop();
+        verify(channel, times(2)).basicCancel(any());
+        verify(channel, times(4)).close();
+    }
+
+    @Test
+    void stopAlsoStopsRunningConsumers() throws Exception {
+        final Messaging messaging = fullyRegistered();
+        messaging.start();
+        messaging.startConsumers();
+
+        messaging.stop();
+
+        verify(channel, times(2)).basicCancel(any());
+        verify(declarer).close();
     }
 
     @Test
@@ -142,7 +190,6 @@ class MessagingTest {
         assertThrows(IOException.class, messaging::start);
 
         verify(channel, never()).confirmSelect();
-        verify(channel, never()).basicConsume(anyString(), anyBoolean(), anyString(), any(Consumer.class));
         verify(declarer).close();
         verify(connection, never()).channel();
         final IllegalStateException e = assertThrows(IllegalStateException.class, messaging::start);
@@ -150,14 +197,22 @@ class MessagingTest {
     }
 
     @Test
-    void consumerStartFailureStopsStartedPublishers() throws Exception {
+    void consumerStartFailureStopsStartedConsumersButKeepsPublishers() throws Exception {
         final Messaging messaging = fullyRegistered();
+        messaging.start();
         when(channel.basicConsume(anyString(), anyBoolean(), anyString(), any(Consumer.class)))
+                .thenReturn("tag")
                 .thenThrow(new IOException("404 NOT_FOUND"));
 
-        assertThrows(IOException.class, messaging::start);
+        assertThrows(IOException.class, messaging::startConsumers);
 
-        verify(channel, times(2)).close();
+        // The first queue's consumer channel is cancelled and closed; publishers stay up until stop().
+        verify(channel).basicCancel("tag");
+        verify(channel, times(1)).close();
+        verify(declarer, never()).close();
+        assertThrows(IllegalStateException.class, messaging::startConsumers);
+
+        messaging.stop();
         verify(declarer).close();
     }
 

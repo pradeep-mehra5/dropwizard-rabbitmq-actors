@@ -38,8 +38,12 @@ import lombok.extern.slf4j.Slf4j;
  *       only published to when this service also consumes from it);</li>
  *   <li>declares the whole topology (exchanges, queues, bindings, sideline and retry), so bindings
  *       exist before the first publish;</li>
- *   <li>starts publishers, then consumers.</li>
+ *   <li>starts the publishers.</li>
  * </ol>
+ * Handlers start receiving messages only with {@link #startConsumers()}, and stop with {@link #stopConsumers()}.
+ * {@link io.appform.dropwizard.actors.RabbitmqActorBundle} calls them when the server has started (after every managed
+ * object) and when it begins stopping (before any managed object), so handlers only run while the whole application
+ * is up. Publishers are available from {@link #start()} to {@link #stop()}.
  *
  * <p>Messaging declares only what is in its config; actor topology is untouched. A queue belongs either to an actor
  * or to messaging, never both.
@@ -68,6 +72,11 @@ public class Messaging implements Managed {
     private final List<MessagePublisher<?>> publishers = new ArrayList<>();
     private final Map<String, QueueConsumer<?>> consumers = new LinkedHashMap<>();
     private volatile State state = State.NEW;
+    /**
+     * Consumers run between {@link #startConsumers()} and {@link #stopConsumers()}, inside {@code STARTED}.
+     */
+    private boolean consuming;
+    private boolean consumersStopped;
 
     public Messaging(final MessagingConfig config,
                      final RMQConfig rmqConfig,
@@ -151,6 +160,11 @@ public class Messaging implements Managed {
                 producerConnection(exchangeSpec), mapper, retryStrategyFactory, exceptionHandlingFactory));
     }
 
+    /**
+     * Declares the whole topology and starts the publishers (including the queues' {@code retryLater} publishers).
+     * Consumers are <b>not</b> started here: call {@link #startConsumers()} once the rest of the application is up.
+     * {@link io.appform.dropwizard.actors.RabbitmqActorBundle} does that automatically when the server has started.
+     */
     @Override
     public synchronized void start() throws Exception {
         checkNotStarted();
@@ -165,36 +179,93 @@ public class Messaging implements Managed {
                 unhandled);
 
         final List<MessagePublisher<?>> startedPublishers = new ArrayList<>();
-        final List<QueueConsumer<?>> startedConsumers = new ArrayList<>();
+        final List<QueueConsumer<?>> consumersWithRetryPublisher = new ArrayList<>();
         try {
             // 2. The whole topology, so every binding exists before the first publish or consume.
             for (final Map.Entry<String, ExchangeSpec> entry : config.getExchanges().entrySet()) {
                 topologyDeclarer.declare(names(entry.getKey()), entry.getValue(), producerConnection(entry.getValue()));
             }
-            // 3. Publishers before consumers: a handler may publish as soon as it receives its first message.
+            // 3. Publishers, including retryLater publishers, so the application can publish while it starts.
             for (final MessagePublisher<?> publisher : publishers) {
                 publisher.start();
                 startedPublishers.add(publisher);
             }
             for (final QueueConsumer<?> consumer : consumers.values()) {
-                consumer.start();
-                startedConsumers.add(consumer);
+                consumer.startRetryPublisher();
+                consumersWithRetryPublisher.add(consumer);
             }
         } catch (Exception e) {
             // 4. On failure, stop only what actually started, then fail.
             log.error("Messaging failed to start; stopping what was started", e);
             state = State.STOPPED;
-            stopAll(startedConsumers, startedPublishers);
+            consumersStopped = true;
+            stopPublishing(consumersWithRetryPublisher, startedPublishers);
             topologyDeclarer.close();
             throw e;
         }
         state = State.STARTED;
-        log.info("Messaging started: exchanges={} publishers={} consumers={}",
+        log.info("Messaging started: exchanges={} publishers={}; consumers {} start with startConsumers()",
                 config.getExchanges().keySet(), publishers.size(), consumers.keySet());
     }
 
     /**
-     * Stops consumers, then publishers. Messaging can't be started again afterwards.
+     * Subscribes every queue's handler. Requires {@link #start()} first; a no-op if consumers are already running.
+     *
+     * <p>Kept separate from {@link #start()} so handlers only receive messages once everything they depend on has
+     * started: the bundle calls this after the server has started, i.e. after every managed object.
+     *
+     * @throws IllegalStateException if messaging is not started, or consumers were already stopped (they can't be
+     *                               restarted)
+     */
+    public synchronized void startConsumers() throws Exception {
+        Preconditions.checkState(state == State.STARTED, "Messaging must be started before its consumers");
+        if (consuming) {
+            return;
+        }
+        Preconditions.checkState(!consumersStopped, "Messaging consumers were stopped and can't be restarted");
+        final List<QueueConsumer<?>> started = new ArrayList<>();
+        try {
+            for (final QueueConsumer<?> consumer : consumers.values()) {
+                consumer.startConsuming();
+                started.add(consumer);
+            }
+        } catch (Exception e) {
+            log.error("Messaging consumers failed to start; stopping the ones that started", e);
+            consumersStopped = true;
+            started.forEach(QueueConsumer::stopConsuming);
+            throw e;
+        }
+        consuming = true;
+        log.info("Messaging consumers started: {}", consumers.keySet());
+    }
+
+    /**
+     * Stops consuming: cancels every subscription and waits for in-flight messages, so no handler runs afterwards.
+     * Publishers keep working until {@link #stop()}. Idempotent; consumers can't be restarted.
+     *
+     * <p>The bundle calls this when the server begins stopping, before any managed object is stopped, so handlers
+     * never run against resources that are already shut down.
+     */
+    public synchronized void stopConsumers() {
+        if (!consuming) {
+            consumersStopped = true;
+            return;
+        }
+        consuming = false;
+        consumersStopped = true;
+        for (final QueueConsumer<?> consumer : consumers.values()) {
+            try {
+                consumer.stopConsuming();
+            } catch (Exception e) {
+                log.error("Error stopping consumer", e);
+            }
+        }
+        log.info("Messaging consumers stopped: {}", consumers.keySet());
+    }
+
+    /**
+     * Stops consumers (if still running), then the retry publishers and publishers. Messaging can't be started again
+     * afterwards.
      */
     @Override
     public synchronized void stop() throws Exception {
@@ -203,7 +274,8 @@ public class Messaging implements Managed {
         }
         state = State.STOPPED;
         try {
-            stopAll(consumers.values(), publishers);
+            stopConsumers();
+            stopPublishing(consumers.values(), publishers);
         } finally {
             topologyDeclarer.close();
         }
@@ -211,18 +283,19 @@ public class Messaging implements Managed {
     }
 
     /**
-     * Stops consumers first (their retry publishers with them), then publishers. Keeps going on failure and rethrows
-     * the first error at the end.
+     * Stops the queues' retry publishers, then the publishers. Keeps going on failure and rethrows the first error at
+     * the end.
      */
-    private static void stopAll(final Collection<? extends QueueConsumer<?>> consumersToStop,
-                                final Collection<? extends MessagePublisher<?>> publishersToStop) throws Exception {
+    private static void stopPublishing(final Collection<? extends QueueConsumer<?>> consumersWithRetryPublisher,
+                                       final Collection<? extends MessagePublisher<?>> publishersToStop)
+            throws Exception {
         Exception first = null;
-        for (final QueueConsumer<?> consumer : consumersToStop) {
+        for (final QueueConsumer<?> consumer : consumersWithRetryPublisher) {
             try {
-                consumer.stop();
+                consumer.stopRetryPublisher();
             } catch (Exception e) {
                 first = first == null ? e : first;
-                log.error("Error stopping consumer", e);
+                log.error("Error stopping retry publisher", e);
             }
         }
         for (final MessagePublisher<?> publisher : publishersToStop) {
