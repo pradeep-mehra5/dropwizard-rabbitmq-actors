@@ -16,6 +16,11 @@ All notable changes to this project will be documented in this file.
   concurrent creators with a different config) instead of silently keeping stale bindings.
 - Survives connection loss: topology is redeclared by automatic recovery; publishes fail fast until the connection
   is back, and channels closed by channel-level errors are reopened on the next publish.
+- Handlers only run while the whole application is up: messaging consumers start once the server has started (after
+  every managed object) and stop as soon as it begins stopping (before any managed object). Topology and publishers
+  start before the application's managed objects and stop after them, so the application can publish throughout.
+- `retryLater` keeps the message's expiry (`x-expire-at`) and goes through the observer chain (metrics, tracing),
+  observed under the queue's retry exchange name (`<queue>_RETRY`).
 - Actor behaviour and topology are unchanged.
 
 ## 2.0.28-14

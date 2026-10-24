@@ -100,6 +100,27 @@ Each `publisher(...)` call opens its own channel: register one publisher per exc
 
 When using `retryLater`, call it as the last step and then `return true`. Calling it and then throwing or returning
 `false` produces duplicates (the handler is retried, or the original is also sidelined). Handlers should be idempotent.
+A retried message keeps its expiry (`publishWithExpiry`), and retries go through observers like normal publishes.
+Observers see a retry under the queue's retry exchange name (`<queue>_RETRY`): with `metricConfig.enabledForAll: false`,
+list that name too to get retry metrics.
+
+### Lifecycle
+The bundle ties messaging to the server lifecycle, so handlers only run while the whole application is up:
+
+| Phase | Messaging |
+|---|---|
+| Managed objects start | topology is declared and publishers start **before** the application's managed objects, so they can publish while starting |
+| Server started | consumers subscribe, **after** every managed object has started. A failure fails startup |
+| Server begins stopping | consumers stop (in-flight messages finish), **before** any managed object stops |
+| Managed objects stop | publishers stop **after** the application's managed objects, so they can publish while stopping |
+
+Consumers start on the Jetty server's "started" event, so the HTTP port is already open when handlers start
+receiving messages; messages published before that wait in their queues.
+
+When using `Messaging` without the bundle, call `startConsumers()` after `start()`, and `stopConsumers()` before
+stopping the resources handlers use. The same applies to commands that run without the Jetty server (e.g. a custom
+`EnvironmentCommand`): there is no "server started" event, so consumers don't start unless `startConsumers()` is
+called.
 
 Messages are deserialized with Dropwizard's `ObjectMapper`. To let publishers add fields before consumers are updated,
 make message classes tolerate unknown properties (`@JsonIgnoreProperties(ignoreUnknown = true)`).
