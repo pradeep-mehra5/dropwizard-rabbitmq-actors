@@ -8,6 +8,8 @@ import com.rabbitmq.client.ShutdownSignalException;
 import io.appform.dropwizard.actors.common.Constants;
 import io.appform.dropwizard.actors.common.RabbitmqActorException;
 import io.appform.dropwizard.actors.connectivity.RMQConnection;
+import io.appform.dropwizard.actors.observers.PublishObserverContext;
+import io.appform.dropwizard.actors.observers.RMQObserver;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
@@ -18,15 +20,19 @@ import java.util.concurrent.TimeoutException;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Publishes deferred retries to a queue's private delayed retry exchange, which is bound only to that queue. If the
- * channel gets closed (e.g. a confirm timed out), it is reopened on the next retry.
+ * Publishes deferred retries to a queue's private delayed retry exchange, which is bound only to that queue. Retries
+ * go through the observer chain like normal publishes. If the channel gets closed (e.g. a confirm timed out), it is
+ * reopened on the next retry.
  */
 @Slf4j
 class QueueRetryPublisher {
 
+    static final String DELAY_HEADER = "x-delay";
+
     private final String retryExchange;
     private final String brokerQueue;
     private final RMQConnection connection;
+    private final RMQObserver observer;
     private final ObjectMapper mapper;
     private final boolean confirms;
     private final long confirmTimeoutMs;
@@ -42,6 +48,7 @@ class QueueRetryPublisher {
         this.retryExchange = MessagingNames.retryExchange(brokerQueue);
         this.brokerQueue = brokerQueue;
         this.connection = connection;
+        this.observer = connection.getRootObserver();
         this.mapper = mapper;
         this.confirms = confirms;
         this.confirmTimeoutMs = confirmTimeoutMs;
@@ -63,24 +70,67 @@ class QueueRetryPublisher {
         }
     }
 
+    /**
+     * Schedules {@code message} for redelivery to this queue after {@code delay}.
+     *
+     * <p>Application headers (not starting with {@code x-}) are carried forward, and so is the message's expiry
+     * ({@code x-expire-at}): a retried message still expires when the original would have. Other broker/library
+     * headers ({@code x-death}, {@code x-delay}, {@code x-published-at}...) are dropped.
+     */
     void publish(final Object message, final Map<String, Object> originalHeaders, final Duration delay) {
         Preconditions.checkArgument(delay != null && !delay.isNegative(), "delay must not be negative");
         final Map<String, Object> headers = new HashMap<>();
+        Object expireAt = null;
         if (originalHeaders != null) {
-            // Carry application headers forward; drop broker/library headers (x-death, x-delay, x-published-at...).
             originalHeaders.forEach((key, value) -> {
                 if (!key.startsWith("x-")) {
                     headers.put(key, value);
                 }
             });
+            expireAt = originalHeaders.get(Constants.MESSAGE_EXPIRY_TEXT);
         }
-        headers.put(Constants.MESSAGE_PUBLISHED_TEXT, Instant.now().toEpochMilli());
-        headers.put("x-delay", delay.toMillis());
+        if (expireAt != null) {
+            headers.put(Constants.MESSAGE_EXPIRY_TEXT, expireAt);
+        }
+        headers.put(DELAY_HEADER, delay.toMillis());
         final AMQP.BasicProperties properties = new AMQP.BasicProperties.Builder()
                 .deliveryMode(2)
+                .headers(headers)
+                .build();
+        final PublishObserverContext context = PublishObserverContext.builder()
+                .queueName(retryExchange)
+                .messageProperties(properties)
+                .build();
+        final Object finalExpireAt = expireAt;
+        observer.executePublish(context, details -> {
+            doPublish(message, enrich(details.getMessageProperties(), delay, finalExpireAt));
+            return null;
+        });
+    }
+
+    /**
+     * Adds, after the observers, what the retry relies on: {@code x-delay}, the carried expiry, {@code x-published-at}
+     * and a fresh {@code messageId}.
+     */
+    private static AMQP.BasicProperties enrich(final AMQP.BasicProperties properties,
+                                               final Duration delay,
+                                               final Object expireAt) {
+        final Map<String, Object> headers = new HashMap<>();
+        if (properties.getHeaders() != null) {
+            headers.putAll(properties.getHeaders());
+        }
+        headers.put(DELAY_HEADER, delay.toMillis());
+        if (expireAt != null) {
+            headers.put(Constants.MESSAGE_EXPIRY_TEXT, expireAt);
+        }
+        headers.put(Constants.MESSAGE_PUBLISHED_TEXT, Instant.now().toEpochMilli());
+        return properties.builder()
                 .messageId(UUID.randomUUID().toString())
                 .headers(headers)
                 .build();
+    }
+
+    private void doPublish(final Object message, final AMQP.BasicProperties properties) {
         try {
             final byte[] body = mapper.writeValueAsBytes(message);
             synchronized (lock) {
